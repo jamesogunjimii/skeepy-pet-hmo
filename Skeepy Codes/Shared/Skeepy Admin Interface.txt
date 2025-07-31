@@ -1,0 +1,2598 @@
+/**
+ * Enhanced Skeepy HMO Admin Interface with Integrated Benefit Deduction
+ * Complete WordPress admin interface for managing pet registrations and clinic partners
+ * WITH ENHANCED BENEFIT DEDUCTION SYSTEM
+ */
+
+// Prevent direct access
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+// ========================================
+// ENHANCED BENEFIT TRACKER CLASS
+// ========================================
+if (!class_exists('SkeepyBenefitTracker')) {
+    class SkeepyBenefitTracker {
+        private $wpdb;
+        private $usage_table;
+        private $pets_table;
+        private $claims_table;
+        
+        public function __construct() {
+            global $wpdb;
+            $this->wpdb = $wpdb;
+            $this->usage_table = $wpdb->prefix . 'skeepy_benefit_usage';
+            $this->pets_table = $wpdb->prefix . 'skeepy_pets';
+            $this->claims_table = $wpdb->prefix . 'skeepy_claims';
+            
+            // Create usage table if needed
+            $this->maybe_create_usage_table();
+        }
+        
+        private function maybe_create_usage_table() {
+            $table_exists = $this->wpdb->get_var("SHOW TABLES LIKE '{$this->usage_table}'");
+            
+            if (!$table_exists) {
+                $charset_collate = $this->wpdb->get_charset_collate();
+                
+                $sql = "CREATE TABLE {$this->usage_table} (
+                    id int(11) NOT NULL AUTO_INCREMENT,
+                    hmo_id varchar(50) NOT NULL,
+                    service_type varchar(50) NOT NULL DEFAULT 'medical',
+                    service_name varchar(100) NOT NULL,
+                    usage_count int(11) NOT NULL DEFAULT 1,
+                    amount_used decimal(10,2) NOT NULL DEFAULT 0.00,
+                    claim_id varchar(50) DEFAULT NULL,
+                    usage_date datetime NOT NULL,
+                    status varchar(20) NOT NULL DEFAULT 'active',
+                    plan_year int(4) DEFAULT NULL,
+                    created_at timestamp DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (id),
+                    KEY hmo_id (hmo_id),
+                    KEY service_name (service_name),
+                    KEY claim_id (claim_id),
+                    KEY usage_date (usage_date),
+                    KEY plan_year (plan_year),
+                    UNIQUE KEY unique_claim_service (hmo_id, claim_id, service_name)
+                ) $charset_collate;";
+                
+                require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+                dbDelta($sql);
+            }
+        }
+        
+        public function getPlanBenefits($plan_type) {
+            $benefits = array(
+                'pawtastic' => array(
+                    'annual_limit' => 360000,
+                    'services' => array(
+                        'deworming' => array('limit' => 1, 'type' => 'count'),
+                        'rabies_vaccine' => array('limit' => 1, 'type' => 'count'),
+                        'basic_grooming' => array('limit' => 1, 'type' => 'count'),
+                        'general_consultation' => array('limit' => -1, 'type' => 'unlimited'),
+                        'surgery' => array('limit' => -1, 'type' => 'unlimited'),
+                        'vaccination' => array('limit' => -1, 'type' => 'unlimited'),
+                        'emergency' => array('limit' => -1, 'type' => 'unlimited')
+                    )
+                ),
+                'furrtastic' => array(
+                    'annual_limit' => 1200000,
+                    'services' => array(
+                        'deworming' => array('limit' => 2, 'type' => 'count'),
+                        'rabies_vaccine' => array('limit' => 2, 'type' => 'count'),
+                        'basic_grooming' => array('limit' => 3, 'type' => 'count'),
+                        'general_consultation' => array('limit' => -1, 'type' => 'unlimited'),
+                        'surgery' => array('limit' => -1, 'type' => 'unlimited'),
+                        'vaccination' => array('limit' => -1, 'type' => 'unlimited'),
+                        'emergency' => array('limit' => -1, 'type' => 'unlimited'),
+                        'medication' => array('limit' => -1, 'type' => 'unlimited')
+                    )
+                ),
+                'purrfect' => array(
+                    'annual_limit' => 2200000,
+                    'services' => array(
+                        'deworming' => array('limit' => 4, 'type' => 'count'),
+                        'rabies_vaccine' => array('limit' => 3, 'type' => 'count'),
+                        'basic_grooming' => array('limit' => 4, 'type' => 'count'),
+                        'premium_grooming' => array('limit' => 2, 'type' => 'count'),
+                        'general_consultation' => array('limit' => -1, 'type' => 'unlimited'),
+                        'surgery' => array('limit' => -1, 'type' => 'unlimited'),
+                        'vaccination' => array('limit' => -1, 'type' => 'unlimited'),
+                        'emergency' => array('limit' => -1, 'type' => 'unlimited'),
+                        'medication' => array('limit' => -1, 'type' => 'unlimited'),
+                        'supplements' => array('limit' => -1, 'type' => 'unlimited')
+                    )
+                )
+            );
+            
+            return isset($benefits[strtolower($plan_type)]) ? $benefits[strtolower($plan_type)] : null;
+        }
+        
+        public function calculateUsedBenefits($hmo_id) {
+            // Get pet details
+            $pet = $this->wpdb->get_row($this->wpdb->prepare(
+                "SELECT * FROM {$this->pets_table} WHERE hmo_id = %s",
+                $hmo_id
+            ));
+            
+            if (!$pet) {
+                return array('error' => 'Pet not found');
+            }
+            
+            // Get current year usage
+            $current_year = date('Y');
+            
+            // Get total amount used from usage table
+            $total_used = $this->wpdb->get_var($this->wpdb->prepare(
+                "SELECT COALESCE(SUM(amount_used), 0) FROM {$this->usage_table} 
+                 WHERE hmo_id = %s AND status = 'active' AND (plan_year = %d OR plan_year IS NULL)",
+                $hmo_id, $current_year
+            ));
+            
+            // Get service usage breakdown
+            $service_usage = $this->wpdb->get_results($this->wpdb->prepare(
+                "SELECT service_name, SUM(usage_count) as total_count, SUM(amount_used) as total_amount 
+                 FROM {$this->usage_table} 
+                 WHERE hmo_id = %s AND status = 'active' AND (plan_year = %d OR plan_year IS NULL)
+                 GROUP BY service_name",
+                $hmo_id, $current_year
+            ));
+            
+            $plan_benefits = $this->getPlanBenefits($pet->plan_type);
+            if (!$plan_benefits) {
+                return array('error' => 'Invalid plan type');
+            }
+            
+            $remaining = max(0, $plan_benefits['annual_limit'] - floatval($total_used));
+            
+            // Format service usage
+            $formatted_service_usage = array();
+            foreach ($service_usage as $usage) {
+                $formatted_service_usage[$usage->service_name] = array(
+                    'used_count' => intval($usage->total_count),
+                    'used_amount' => floatval($usage->total_amount)
+                );
+            }
+            
+            return array(
+                'pet' => $pet,
+                'plan_benefits' => $plan_benefits,
+                'service_usage' => $formatted_service_usage,
+                'total_coverage_used' => floatval($total_used),
+                'total_coverage_limit' => $plan_benefits['annual_limit'],
+                'remaining_coverage' => $remaining
+            );
+        }
+        
+        public function deductBenefitUsage($hmo_id, $claim_id, $services, $amount) {
+            $clean_amount = floatval(str_replace(['₦', ','], '', $amount));
+            
+            // Check if already processed
+            $exists = $this->wpdb->get_var($this->wpdb->prepare(
+                "SELECT id FROM {$this->usage_table} 
+                 WHERE hmo_id = %s AND claim_id = %s",
+                $hmo_id, $claim_id
+            ));
+            
+            if ($exists) {
+                return true; // Already processed
+            }
+            
+            // Parse services
+            $services_array = $this->parseServices($services);
+            $current_year = date('Y');
+            
+            // If no specific services, create a general entry
+            if (empty($services_array)) {
+                $services_array = array(array(
+                    'name' => 'General Consultation',
+                    'amount' => $clean_amount,
+                    'quantity' => 1
+                ));
+            }
+            
+            // Process each service
+            foreach ($services_array as $service_info) {
+                $service_name = $this->normalizeServiceName($service_info['name']);
+                $quantity = isset($service_info['quantity']) ? intval($service_info['quantity']) : 1;
+                $service_amount = isset($service_info['amount']) ? floatval($service_info['amount']) : ($clean_amount / count($services_array));
+                
+                // Insert usage record
+                $result = $this->wpdb->insert(
+                    $this->usage_table,
+                    array(
+                        'hmo_id' => $hmo_id,
+                        'service_type' => 'medical',
+                        'service_name' => $service_name,
+                        'usage_count' => $quantity,
+                        'amount_used' => $service_amount,
+                        'claim_id' => $claim_id,
+                        'usage_date' => current_time('mysql'),
+                        'status' => 'active',
+                        'plan_year' => $current_year
+                    ),
+                    array('%s', '%s', '%s', '%d', '%f', '%s', '%s', '%s', '%d')
+                );
+                
+                if ($result === false) {
+                    error_log("Skeepy Benefit Deduction Error: " . $this->wpdb->last_error);
+                }
+            }
+            
+            return true;
+        }
+        
+        private function parseServices($services) {
+            if (is_string($services)) {
+                // Try to decode as JSON first
+                $decoded = json_decode($services, true);
+                if (is_array($decoded)) {
+                    return array_map(function($service) {
+                        return array(
+                            'name' => is_array($service) ? ($service['service'] ?? $service['name'] ?? 'Unknown') : $service,
+                            'quantity' => is_array($service) ? ($service['quantity'] ?? 1) : 1,
+                            'amount' => is_array($service) ? ($service['amount'] ?? 0) : 0
+                        );
+                    }, $decoded);
+                } else {
+                    // Simple comma-separated string
+                    $services_list = explode(',', $services);
+                    return array_map(function($service) {
+                        return array(
+                            'name' => trim($service),
+                            'quantity' => 1,
+                            'amount' => 0
+                        );
+                    }, array_filter($services_list));
+                }
+            } elseif (is_array($services)) {
+                return array_map(function($service) {
+                    return array(
+                        'name' => is_array($service) ? ($service['service'] ?? $service['name'] ?? 'Unknown') : $service,
+                        'quantity' => is_array($service) ? ($service['quantity'] ?? 1) : 1,
+                        'amount' => is_array($service) ? ($service['amount'] ?? 0) : 0
+                    );
+                }, $services);
+            }
+            
+            return array();
+        }
+        
+        private function normalizeServiceName($service_name) {
+            $service_name = strtolower(trim($service_name));
+            
+            // Service name mapping
+            $mapping = array(
+                'general consultation' => 'general_consultation',
+                'consultation' => 'general_consultation',
+                'deworming' => 'deworming',
+                'rabies vaccination' => 'rabies_vaccine',
+                'rabies vaccine' => 'rabies_vaccine',
+                'vaccination' => 'vaccination',
+                'basic grooming' => 'basic_grooming',
+                'premium grooming' => 'premium_grooming',
+                'grooming' => 'basic_grooming',
+                'surgery' => 'surgery',
+                'spaying' => 'surgery',
+                'neutering' => 'surgery',
+                'wound repair' => 'surgery',
+                'mass removal' => 'surgery',
+                'emergency' => 'emergency',
+                'emergencies' => 'emergency',
+                'medication' => 'medication',
+                'supplements' => 'supplements'
+            );
+            
+            return isset($mapping[$service_name]) ? $mapping[$service_name] : $service_name;
+        }
+    }
+}
+
+class SkeepyAdminInterface {
+    
+    private $benefit_tracker;
+    
+    public function __construct() {
+        $this->benefit_tracker = new SkeepyBenefitTracker();
+        
+        add_action('admin_menu', array($this, 'add_admin_menu'));
+        add_action('admin_enqueue_scripts', array($this, 'enqueue_admin_scripts'));
+        add_action('wp_ajax_skeepy_delete_record', array($this, 'ajax_delete_record'));
+        add_action('wp_ajax_skeepy_approve_application', array($this, 'ajax_approve_application'));
+        add_action('wp_ajax_skeepy_update_status', array($this, 'ajax_update_status'));
+        add_action('wp_ajax_skeepy_bulk_action', array($this, 'ajax_bulk_action'));
+        add_action('wp_ajax_skeepy_get_pet_details', array($this, 'ajax_get_pet_details'));
+        add_action('wp_ajax_skeepy_get_clinic_details', array($this, 'ajax_get_clinic_details'));
+        // Add claims AJAX handlers
+        add_action('wp_ajax_skeepy_get_claim_details', array($this, 'ajax_get_claim_details'));
+        add_action('wp_ajax_skeepy_approve_claim', array($this, 'ajax_approve_claim'));
+        add_action('wp_ajax_skeepy_reject_claim', array($this, 'ajax_reject_claim'));
+        // ADDED: Benefit tracking handlers
+        add_action('wp_ajax_skeepy_get_benefit_status', array($this, 'ajax_get_benefit_status'));
+        add_action('wp_ajax_skeepy_manual_benefit_deduction', array($this, 'ajax_manual_benefit_deduction'));
+    }
+    
+    public function add_admin_menu() {
+        // Main menu
+        add_menu_page(
+            'Skeepy HMO Management',
+            'Skeepy HMO',
+            'administrator',
+            'skeepy-hmo',
+            array($this, 'dashboard_page'),
+            'dashicons-pets',
+            30
+        );
+        
+        // Pet registrations submenu
+        add_submenu_page(
+            'skeepy-hmo',
+            'Pet Registrations',
+            'Pet Registrations',
+            'administrator',
+            'skeepy-pets',
+            array($this, 'pets_page')
+        );
+        
+        // Add new pet submenu
+        add_submenu_page(
+            'skeepy-hmo',
+            'Add New Pet',
+            'Add New Pet',
+            'administrator',
+            'skeepy-add-pet',
+            array($this, 'add_pet_page')
+        );
+        
+        // Clinic partners submenu
+        add_submenu_page(
+            'skeepy-hmo',
+            'Clinic Partners',
+            'Clinic Partners',
+            'administrator',
+            'skeepy-clinics',
+            array($this, 'clinics_page')
+        );
+        
+        // Add new clinic submenu
+        add_submenu_page(
+            'skeepy-hmo',
+            'Add New Clinic',
+            'Add New Clinic',
+            'administrator',
+            'skeepy-add-clinic',
+            array($this, 'add_clinic_page')
+        );
+        
+        // Claims management submenu
+        add_submenu_page(
+            'skeepy-hmo',
+            'Claims Management',
+            'Claims Management',
+            'administrator',
+            'skeepy-claims',
+            array($this, 'claims_page')
+        );
+        
+        // Reports submenu
+        add_submenu_page(
+            'skeepy-hmo',
+            'Reports & Analytics',
+            'Reports',
+            'administrator',
+            'skeepy-reports',
+            array($this, 'reports_page')
+        );
+    }
+    
+    public function enqueue_admin_scripts($hook) {
+        if (strpos($hook, 'skeepy') !== false) {
+            wp_enqueue_script('skeepy-admin-js', '', array('jquery'), '1.0.0', true);
+            wp_localize_script('skeepy-admin-js', 'skeepy_ajax', array(
+                'ajax_url' => admin_url('admin-ajax.php'),
+                'nonce' => wp_create_nonce('skeepy_admin_nonce')
+            ));
+            
+            // Inline CSS for better styling
+            wp_add_inline_style('wp-admin', $this->get_admin_styles());
+        }
+    }
+    
+    private function get_admin_styles() {
+        return '
+        .skeepy-admin-wrap {
+            margin: 20px 0;
+        }
+        .skeepy-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #fff;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .skeepy-table th, .skeepy-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        .skeepy-table th {
+            background: #f7f7f7;
+            font-weight: 600;
+        }
+        .skeepy-table tr:hover {
+            background: #f9f9f9;
+        }
+        .skeepy-status {
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .status-pending {
+            background: #fff3cd;
+            color: #856404;
+        }
+        .status-active {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status-approved {
+            background: #d1ecf1;
+            color: #0c5460;
+        }
+        .status-cancelled {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .status-rejected {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .status-paid {
+            background: #28a745;
+            color: white;
+        }
+        .claim-amount {
+            font-weight: bold;
+            color: #0073aa;
+            font-size: 14px;
+        }
+        .skeepy-actions {
+            display: flex;
+            gap: 8px;
+        }
+        .skeepy-btn {
+            padding: 6px 12px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            text-decoration: none;
+        }
+        .btn-primary {
+            background: #0073aa;
+            color: white;
+        }
+        .btn-success {
+            background: #28a745;
+            color: white;
+        }
+        .btn-danger {
+            background: #dc3545;
+            color: white;
+        }
+        .btn-warning {
+            background: #ffc107;
+            color: #212529;
+        }
+        .btn-info {
+            background: #17a2b8;
+            color: white;
+        }
+        .skeepy-detail-box {
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        .detail-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+        }
+        .detail-item {
+            padding: 10px 0;
+            border-bottom: 1px solid #eee;
+        }
+        .detail-label {
+            font-weight: 600;
+            color: #555;
+            margin-bottom: 5px;
+        }
+        .detail-value {
+            color: #333;
+        }
+        .services-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .service-item {
+            background: #f8f9fa;
+            padding: 8px;
+            border-radius: 4px;
+            border-left: 3px solid #0073aa;
+        }
+        .filters-bar {
+            background: #fff;
+            padding: 15px;
+            margin-bottom: 20px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .filters-row {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .bulk-actions-bar {
+            background: #f8f9fa;
+            padding: 15px;
+            margin-bottom: 20px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            display: none;
+        }
+        .bulk-actions-bar.show {
+            display: block;
+        }
+        #skeepy-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 9999;
+        }
+        #skeepy-modal .modal-content {
+            position: relative;
+            margin: 50px auto;
+            width: 80%;
+            max-width: 800px;
+            background: white;
+            border-radius: 8px;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+        #skeepy-modal .modal-header {
+            padding: 20px;
+            border-bottom: 1px solid #ddd;
+        }
+        #skeepy-modal .modal-body {
+            padding: 20px;
+        }
+        #skeepy-modal .close {
+            position: absolute;
+            top: 15px;
+            right: 20px;
+            background: none;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+        }
+        .benefit-status-box {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 15px 0;
+        }
+        .benefit-progress {
+            background: #e9ecef;
+            height: 10px;
+            border-radius: 5px;
+            overflow: hidden;
+            margin: 8px 0;
+        }
+        .benefit-progress-bar {
+            height: 100%;
+            transition: width 0.3s ease;
+        }
+        .benefit-progress-bar.low { background: #28a745; }
+        .benefit-progress-bar.medium { background: #ffc107; }
+        .benefit-progress-bar.high { background: #dc3545; }
+        ';
+    }
+    
+    public function dashboard_page() {
+        global $wpdb;
+        
+        // Get summary statistics
+        $pets_table = $wpdb->prefix . 'skeepy_pets';
+        $clinics_table = $wpdb->prefix . 'skeepy_clinics';
+        $claims_table = $wpdb->prefix . 'skeepy_claims';
+        
+        $total_pets = $wpdb->get_var("SELECT COUNT(*) FROM $pets_table");
+        $active_pets = $wpdb->get_var("SELECT COUNT(*) FROM $pets_table WHERE plan_status = 'active'");
+        $pending_pets = $wpdb->get_var("SELECT COUNT(*) FROM $pets_table WHERE plan_status = 'pending'");
+        
+        $total_clinics = $wpdb->get_var("SELECT COUNT(*) FROM $clinics_table");
+        $approved_clinics = $wpdb->get_var("SELECT COUNT(*) FROM $clinics_table WHERE application_status = 'approved'");
+        $pending_clinics = $wpdb->get_var("SELECT COUNT(*) FROM $clinics_table WHERE application_status = 'pending'");
+        
+        // Claims statistics
+        $total_claims = $wpdb->get_var("SELECT COUNT(*) FROM $claims_table");
+        $pending_claims = $wpdb->get_var("SELECT COUNT(*) FROM $claims_table WHERE status = 'pending'");
+        $approved_claims = $wpdb->get_var("SELECT COUNT(*) FROM $claims_table WHERE status = 'approved'");
+        $total_claim_amount = (float) $wpdb->get_var("SELECT SUM(CAST(REPLACE(REPLACE(total_amount, '₦', ''), ',', '') AS DECIMAL(10,2))) FROM $claims_table WHERE status IN ('approved', 'paid') AND total_amount IS NOT NULL");
+        
+        // Recent registrations
+        $recent_pets = $wpdb->get_results("SELECT * FROM $pets_table ORDER BY registration_date DESC LIMIT 5");
+        $recent_clinics = $wpdb->get_results("SELECT * FROM $clinics_table ORDER BY application_date DESC LIMIT 5");
+        $recent_claims = $wpdb->get_results("SELECT * FROM $claims_table ORDER BY submission_date DESC LIMIT 5");
+        
+        ?>
+        <div class="wrap skeepy-admin-wrap">
+            <h1>Skeepy HMO Dashboard</h1>
+            
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin: 20px 0;">
+                <div class="skeepy-detail-box" style="text-align: center;">
+                    <h3 style="margin: 0; color: #0073aa;">Total Pets</h3>
+                    <p style="font-size: 32px; margin: 10px 0; font-weight: bold;"><?php echo $total_pets; ?></p>
+                    <p style="margin: 0; color: #666;">Active: <?php echo $active_pets; ?> | Pending: <?php echo $pending_pets; ?></p>
+                </div>
+                
+                <div class="skeepy-detail-box" style="text-align: center;">
+                    <h3 style="margin: 0; color: #28a745;">Clinic Partners</h3>
+                    <p style="font-size: 32px; margin: 10px 0; font-weight: bold;"><?php echo $total_clinics; ?></p>
+                    <p style="margin: 0; color: #666;">Approved: <?php echo $approved_clinics; ?> | Pending: <?php echo $pending_clinics; ?></p>
+                </div>
+                
+                <div class="skeepy-detail-box" style="text-align: center;">
+                    <h3 style="margin: 0; color: #dc3545;">Claims</h3>
+                    <p style="font-size: 32px; margin: 10px 0; font-weight: bold;"><?php echo $total_claims; ?></p>
+                    <p style="margin: 0; color: #666;">Pending: <?php echo $pending_claims; ?> | Approved: <?php echo $approved_claims; ?></p>
+                </div>
+                
+                <div class="skeepy-detail-box" style="text-align: center;">
+                    <h3 style="margin: 0; color: #ffc107;">Claims Value</h3>
+                    <p style="font-size: 32px; margin: 10px 0; font-weight: bold;">₦<?php echo number_format($total_claim_amount ?: 0); ?></p>
+                    <p style="margin: 0; color: #666;">Approved & Paid</p>
+                </div>
+            </div>
+            
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px;">
+                <div class="skeepy-detail-box">
+                    <h3>Recent Pet Registrations</h3>
+                    <?php if ($recent_pets): ?>
+                        <table class="skeepy-table">
+                            <thead>
+                                <tr>
+                                    <th>HMO ID</th>
+                                    <th>Pet Name</th>
+                                    <th>Guardian</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($recent_pets as $pet): ?>
+                                <tr>
+                                    <td><?php echo esc_html($pet->hmo_id); ?></td>
+                                    <td><?php echo esc_html($pet->pet_name); ?></td>
+                                    <td><?php echo esc_html($pet->guardian_first_name . ' ' . $pet->guardian_surname); ?></td>
+                                    <td><span class="skeepy-status status-<?php echo esc_attr($pet->plan_status); ?>"><?php echo esc_html(ucfirst($pet->plan_status)); ?></span></td>
+                                </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    <?php else: ?>
+                        <p>No pet registrations yet.</p>
+                    <?php endif; ?>
+                </div>
+                
+                <div class="skeepy-detail-box">
+                    <h3>Recent Clinic Applications</h3>
+                    <?php if ($recent_clinics): ?>
+                        <table class="skeepy-table">
+                            <thead>
+                                <tr>
+                                    <th>Provider ID</th>
+                                    <th>Clinic Name</th>
+                                    <th>Representative</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($recent_clinics as $clinic): ?>
+                                <tr>
+                                    <td><?php echo esc_html($clinic->provider_id); ?></td>
+                                    <td><?php echo esc_html($clinic->clinic_name); ?></td>
+                                    <td><?php echo esc_html($clinic->rep_first_name . ' ' . $clinic->rep_last_name); ?></td>
+                                    <td><span class="skeepy-status status-<?php echo esc_attr($clinic->application_status); ?>"><?php echo esc_html(ucfirst($clinic->application_status)); ?></span></td>
+                                </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    <?php else: ?>
+                        <p>No clinic applications yet.</p>
+                    <?php endif; ?>
+                </div>
+                
+                <div class="skeepy-detail-box">
+                    <h3>Recent Claims</h3>
+                    <?php if ($recent_claims): ?>
+                        <table class="skeepy-table">
+                            <thead>
+                                <tr>
+                                    <th>Claim ID</th>
+                                    <th>Clinic</th>
+                                    <th>Amount</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($recent_claims as $claim): ?>
+                                <tr>
+                                    <td><?php echo esc_html($claim->claim_id); ?></td>
+                                    <td><?php echo esc_html($claim->clinic_name); ?></td>
+                                    <td class="claim-amount">₦<?php echo number_format((float)str_replace(array('₦', ','), '', $claim->total_amount)); ?></td>
+                                    <td><span class="skeepy-status status-<?php echo esc_attr($claim->status); ?>"><?php echo esc_html(ucfirst($claim->status)); ?></span></td>
+                                </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    <?php else: ?>
+                        <p>No claims submitted yet.</p>
+                    <?php endif; ?>
+                </div>
+            </div>
+        </div>
+        <?php
+    }
+    
+    public function pets_page() {
+        global $wpdb;
+        $pets_table = $wpdb->prefix . 'skeepy_pets';
+        
+        // Handle filters
+        $where_clause = "WHERE 1=1";
+        $search = isset($_GET['search']) ? sanitize_text_field($_GET['search']) : '';
+        $status_filter = isset($_GET['status']) ? sanitize_text_field($_GET['status']) : '';
+        $plan_filter = isset($_GET['plan_type']) ? sanitize_text_field($_GET['plan_type']) : '';
+        
+        if ($search) {
+            $where_clause .= $wpdb->prepare(" AND (hmo_id LIKE %s OR pet_name LIKE %s OR guardian_first_name LIKE %s OR guardian_surname LIKE %s)", 
+                '%' . $search . '%', '%' . $search . '%', '%' . $search . '%', '%' . $search . '%');
+        }
+        if ($status_filter) {
+            $where_clause .= $wpdb->prepare(" AND plan_status = %s", $status_filter);
+        }
+        if ($plan_filter) {
+            $where_clause .= $wpdb->prepare(" AND plan_type = %s", $plan_filter);
+        }
+        
+        // Pagination
+        $per_page = 20;
+        $current_page = isset($_GET['paged']) ? max(1, intval($_GET['paged'])) : 1;
+        $offset = ($current_page - 1) * $per_page;
+        
+        $total_items = $wpdb->get_var("SELECT COUNT(*) FROM $pets_table $where_clause");
+        $total_pages = ceil($total_items / $per_page);
+        
+        $pets = $wpdb->get_results("SELECT * FROM $pets_table $where_clause ORDER BY registration_date DESC LIMIT $per_page OFFSET $offset");
+        
+        ?>
+        <div class="wrap skeepy-admin-wrap">
+            <h1>Pet Registrations 
+                <a href="<?php echo admin_url('admin.php?page=skeepy-add-pet'); ?>" class="page-title-action">Add New</a>
+            </h1>
+            
+            <!-- Filters -->
+            <div class="filters-bar">
+                <form method="get" action="">
+                    <input type="hidden" name="page" value="skeepy-pets">
+                    <div class="filters-row">
+                        <input type="text" name="search" placeholder="Search pets, guardians, HMO IDs..." value="<?php echo esc_attr($search); ?>" style="width: 250px;">
+                        
+                        <select name="status">
+                            <option value="">All Statuses</option>
+                            <option value="pending" <?php selected($status_filter, 'pending'); ?>>Pending</option>
+                            <option value="active" <?php selected($status_filter, 'active'); ?>>Active</option>
+                            <option value="cancelled" <?php selected($status_filter, 'cancelled'); ?>>Cancelled</option>
+                        </select>
+                        
+                        <select name="plan_type">
+                            <option value="">All Plans</option>
+                            <option value="pawtastic" <?php selected($plan_filter, 'pawtastic'); ?>>Pawtastic</option>
+                            <option value="furrtastic" <?php selected($plan_filter, 'furrtastic'); ?>>Furrtastic</option>
+                            <option value="purrfect" <?php selected($plan_filter, 'purrfect'); ?>>Purrfect</option>
+                        </select>
+                        
+                        <button type="submit" class="button">Filter</button>
+                        <a href="<?php echo admin_url('admin.php?page=skeepy-pets'); ?>" class="button">Clear Filters</a>
+                    </div>
+                </form>
+            </div>
+            
+            <!-- Bulk Actions -->
+            <div class="bulk-actions-bar" id="bulk-actions-bar">
+                <div class="filters-row">
+                    <span>Selected: <span id="selected-count">0</span> items</span>
+                    <select id="bulk-action-select">
+                        <option value="">Bulk Actions</option>
+                        <option value="activate">Activate</option>
+                        <option value="deactivate">Deactivate</option>
+                        <option value="delete">Delete</option>
+                    </select>
+                    <button type="button" class="button" onclick="executeBulkAction()">Apply</button>
+                    <button type="button" class="button" onclick="clearSelection()">Clear Selection</button>
+                </div>
+            </div>
+            
+            <!-- Pets Table -->
+            <div class="skeepy-detail-box">
+                <table class="skeepy-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 40px;">
+                                <input type="checkbox" id="select-all" onchange="toggleSelectAll(this)">
+                            </th>
+                            <th>HMO ID</th>
+                            <th>Pet Name</th>
+                            <th>Type</th>
+                            <th>Guardian</th>
+                            <th>Plan</th>
+                            <th>Duration</th>
+                            <th>Status</th>
+                            <th>Registration Date</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if ($pets): ?>
+                            <?php foreach ($pets as $pet): ?>
+                            <tr>
+                                <td>
+                                    <input type="checkbox" class="pet-checkbox" value="<?php echo $pet->id; ?>" onchange="updateBulkActions()">
+                                </td>
+                                <td><strong><?php echo esc_html($pet->hmo_id); ?></strong></td>
+                                <td><?php echo esc_html($pet->pet_name); ?></td>
+                                <td><?php echo esc_html(ucfirst($pet->pet_type)); ?></td>
+                                <td><?php echo esc_html($pet->guardian_first_name . ' ' . $pet->guardian_surname); ?></td>
+                                <td><?php echo esc_html(ucfirst($pet->plan_type)); ?></td>
+                                <td><?php echo esc_html(ucfirst($pet->plan_duration)); ?></td>
+                                <td>
+                                    <span class="skeepy-status status-<?php echo esc_attr($pet->plan_status); ?>">
+                                        <?php echo esc_html(ucfirst($pet->plan_status)); ?>
+                                    </span>
+                                </td>
+                                <td><?php echo date('M j, Y', strtotime($pet->registration_date)); ?></td>
+                                <td>
+                                    <div class="skeepy-actions">
+                                        <button class="skeepy-btn btn-primary" onclick="viewPetDetails(<?php echo $pet->id; ?>)">View</button>
+                                        <button class="skeepy-btn btn-info" onclick="viewBenefitStatus('<?php echo esc_js($pet->hmo_id); ?>')">Benefits</button>
+                                        <?php if ($pet->plan_status === 'pending'): ?>
+                                            <button class="skeepy-btn btn-success" onclick="updatePetStatus(<?php echo $pet->id; ?>, 'active')">Activate</button>
+                                        <?php elseif ($pet->plan_status === 'active'): ?>
+                                            <button class="skeepy-btn btn-warning" onclick="updatePetStatus(<?php echo $pet->id; ?>, 'cancelled')">Cancel</button>
+                                        <?php endif; ?>
+                                    </div>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                        <?php else: ?>
+                            <tr>
+                                <td colspan="10" style="text-align: center; padding: 40px; color: #666;">
+                                    No pets found matching your criteria.
+                                </td>
+                            </tr>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+                
+                <!-- Pagination -->
+                <?php if ($total_pages > 1): ?>
+                <div style="margin-top: 20px; text-align: center;">
+                    <?php
+                    $page_links = paginate_links(array(
+                        'base' => add_query_arg('paged', '%#%'),
+                        'format' => '',
+                        'prev_text' => __('&laquo; Previous'),
+                        'next_text' => __('Next &raquo;'),
+                        'total' => $total_pages,
+                        'current' => $current_page
+                    ));
+                    echo $page_links;
+                    ?>
+                    <p style="margin-top: 10px; color: #666;">
+                        Showing <?php echo (($current_page - 1) * $per_page + 1); ?> to <?php echo min($current_page * $per_page, $total_items); ?> of <?php echo $total_items; ?> entries
+                    </p>
+                </div>
+                <?php endif; ?>
+            </div>
+        </div>
+        
+        <!-- Modal for pet details -->
+        <div id="skeepy-modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Pet Details</h3>
+                    <button class="close" onclick="closeModal()">&times;</button>
+                </div>
+                <div class="modal-body" id="modal-body-content">
+                    <!-- Content will be loaded here -->
+                </div>
+            </div>
+        </div>
+        
+        <script>
+        let selectedPets = [];
+        
+        function toggleSelectAll(checkbox) {
+            const checkboxes = document.querySelectorAll('.pet-checkbox');
+            checkboxes.forEach(cb => {
+                cb.checked = checkbox.checked;
+            });
+            updateBulkActions();
+        }
+        
+        function updateBulkActions() {
+            const checkboxes = document.querySelectorAll('.pet-checkbox:checked');
+            selectedPets = Array.from(checkboxes).map(cb => cb.value);
+            
+            const bulkBar = document.getElementById('bulk-actions-bar');
+            const countSpan = document.getElementById('selected-count');
+            
+            if (selectedPets.length > 0) {
+                bulkBar.classList.add('show');
+                countSpan.textContent = selectedPets.length;
+            } else {
+                bulkBar.classList.remove('show');
+            }
+        }
+        
+        function clearSelection() {
+            document.querySelectorAll('.pet-checkbox').forEach(cb => cb.checked = false);
+            document.getElementById('select-all').checked = false;
+            updateBulkActions();
+        }
+        
+        function executeBulkAction() {
+            const action = document.getElementById('bulk-action-select').value;
+            if (!action || selectedPets.length === 0) {
+                alert('Please select an action and at least one pet.');
+                return;
+            }
+            
+            if (confirm('Are you sure you want to ' + action + ' the selected pets?')) {
+                jQuery.post(ajaxurl, {
+                    action: 'skeepy_bulk_action',
+                    bulk_action: action,
+                    pet_ids: selectedPets,
+                    nonce: '<?php echo wp_create_nonce('skeepy_admin_nonce'); ?>'
+                }, function(response) {
+                    if (response.success) {
+                        location.reload();
+                    } else {
+                        alert('Error: ' + response.data);
+                    }
+                });
+            }
+        }
+        
+        function viewPetDetails(petId) {
+            jQuery.post(ajaxurl, {
+                action: 'skeepy_get_pet_details',
+                pet_id: petId,
+                nonce: '<?php echo wp_create_nonce('skeepy_admin_nonce'); ?>'
+            }, function(response) {
+                if (response.success) {
+                    document.getElementById('modal-body-content').innerHTML = response.data;
+                    document.getElementById('skeepy-modal').style.display = 'block';
+                }
+            });
+        }
+        
+        function viewBenefitStatus(hmoId) {
+            jQuery.post(ajaxurl, {
+                action: 'skeepy_get_benefit_status',
+                hmo_id: hmoId,
+                nonce: '<?php echo wp_create_nonce('skeepy_admin_nonce'); ?>'
+            }, function(response) {
+                if (response.success) {
+                    displayBenefitStatusModal(response.data);
+                } else {
+                    alert('Error loading benefit status: ' + response.data);
+                }
+            });
+        }
+        
+        function displayBenefitStatusModal(benefitData) {
+            const usagePercentage = (benefitData.total_coverage_used / benefitData.total_coverage_limit * 100).toFixed(1);
+            const progressClass = usagePercentage > 80 ? 'high' : usagePercentage > 60 ? 'medium' : 'low';
+            
+            let html = `
+                <div class="benefit-status-box">
+                    <h4 style="margin: 0 0 15px 0; color: #145362;">Benefit Status - ${benefitData.pet.plan_type.toUpperCase()} Plan</h4>
+                    
+                    <div style="margin-bottom: 20px;">
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                            <span><strong>Annual Coverage:</strong></span>
+                            <span style="font-weight: 600;">₦${benefitData.remaining_coverage.toLocaleString()} / ₦${benefitData.total_coverage_limit.toLocaleString()}</span>
+                        </div>
+                        <div class="benefit-progress">
+                            <div class="benefit-progress-bar ${progressClass}" style="width: ${usagePercentage}%;"></div>
+                        </div>
+                        <div style="font-size: 12px; color: #6b7280; text-align: center;">${usagePercentage}% used (₦${benefitData.total_coverage_used.toLocaleString()} of ₦${benefitData.total_coverage_limit.toLocaleString()})</div>
+                    </div>
+                    
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                        <div>
+                            <strong>Pet Information:</strong><br>
+                            Name: ${benefitData.pet.pet_name}<br>
+                            Type: ${benefitData.pet.pet_type}<br>
+                            HMO ID: ${benefitData.pet.hmo_id}
+                        </div>
+                        <div>
+                            <strong>Plan Details:</strong><br>
+                            Plan: ${benefitData.pet.plan_type.toUpperCase()}<br>
+                            Status: ${benefitData.pet.plan_status}<br>
+                            Remaining: ₦${benefitData.remaining_coverage.toLocaleString()}
+                        </div>
+                    </div>
+            `;
+            
+            // Service usage details
+            if (Object.keys(benefitData.service_usage).length > 0) {
+                html += `
+                    <div style="margin-top: 20px;">
+                        <h5 style="margin: 0 0 10px 0; color: #145362;">Service Usage This Year:</h5>
+                        <div style="max-height: 200px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 4px; padding: 10px;">
+                `;
+                
+                for (const [serviceName, usage] of Object.entries(benefitData.service_usage)) {
+                    const planService = benefitData.plan_benefits.services[serviceName];
+                    let limitText = '';
+                    let statusColor = '#10b981';
+                    
+                    if (planService) {
+                        if (planService.type === 'count') {
+                            const remaining = planService.limit - usage.used_count;
+                            limitText = `${usage.used_count}/${planService.limit} times`;
+                            statusColor = remaining <= 0 ? '#dc2626' : remaining <= 1 ? '#f59e0b' : '#10b981';
+                        } else if (planService.type === 'amount') {
+                            limitText = `₦${usage.used_amount.toLocaleString()} used`;
+                            statusColor = '#10b981';
+                        } else {
+                            limitText = `${usage.used_count} times (unlimited)`;
+                            statusColor = '#10b981';
+                        }
+                    } else {
+                        limitText = `₦${usage.used_amount.toLocaleString()} used`;
+                    }
+                    
+                    html += `
+                        <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #f3f4f6;">
+                            <span style="color: #374151;">${serviceName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}</span>
+                            <span style="color: ${statusColor}; font-weight: 600;">${limitText}</span>
+                        </div>
+                    `;
+                }
+                
+                html += `</div></div>`;
+            } else {
+                html += `
+                    <div style="margin-top: 20px; text-align: center; color: #666; font-style: italic;">
+                        No services used yet this year.
+                    </div>
+                `;
+            }
+            
+            html += `</div>`;
+            
+            document.getElementById('modal-body-content').innerHTML = html;
+            document.getElementById('skeepy-modal').style.display = 'block';
+        }
+        
+        function updatePetStatus(petId, status) {
+            if (confirm('Are you sure you want to update this pet status?')) {
+                jQuery.post(ajaxurl, {
+                    action: 'skeepy_update_status',
+                    table: 'pets',
+                    record_id: petId,
+                    status: status,
+                    nonce: '<?php echo wp_create_nonce('skeepy_admin_nonce'); ?>'
+                }, function(response) {
+                    if (response.success) {
+                        location.reload();
+                    } else {
+                        alert('Error: ' + response.data);
+                    }
+                });
+            }
+        }
+        
+        function closeModal() {
+            document.getElementById('skeepy-modal').style.display = 'none';
+        }
+        
+        // Close modal when clicking outside
+        window.onclick = function(event) {
+            var modal = document.getElementById('skeepy-modal');
+            if (event.target == modal) {
+                modal.style.display = 'none';
+            }
+        }
+        </script>
+        <?php
+    }
+    
+    public function clinics_page() {
+        global $wpdb;
+        $clinics_table = $wpdb->prefix . 'skeepy_clinics';
+        
+        // Handle filters
+        $where_clause = "WHERE 1=1";
+        $search = isset($_GET['search']) ? sanitize_text_field($_GET['search']) : '';
+        $status_filter = isset($_GET['status']) ? sanitize_text_field($_GET['status']) : '';
+        $location_filter = isset($_GET['location']) ? sanitize_text_field($_GET['location']) : '';
+        
+        if ($search) {
+            $where_clause .= $wpdb->prepare(" AND (provider_id LIKE %s OR clinic_name LIKE %s OR rep_first_name LIKE %s OR rep_last_name LIKE %s OR clinic_email LIKE %s)", 
+                '%' . $search . '%', '%' . $search . '%', '%' . $search . '%', '%' . $search . '%', '%' . $search . '%');
+        }
+        if ($status_filter) {
+            $where_clause .= $wpdb->prepare(" AND application_status = %s", $status_filter);
+        }
+        if ($location_filter) {
+            $where_clause .= $wpdb->prepare(" AND (clinic_address LIKE %s)", '%' . $location_filter . '%');
+        }
+        
+        // Pagination
+        $per_page = 20;
+        $current_page = isset($_GET['paged']) ? max(1, intval($_GET['paged'])) : 1;
+        $offset = ($current_page - 1) * $per_page;
+        
+        $total_items = $wpdb->get_var("SELECT COUNT(*) FROM $clinics_table $where_clause");
+        $total_pages = ceil($total_items / $per_page);
+        
+        $clinics = $wpdb->get_results("SELECT * FROM $clinics_table $where_clause ORDER BY application_date DESC LIMIT $per_page OFFSET $offset");
+        
+        ?>
+        <div class="wrap skeepy-admin-wrap">
+            <h1>Clinic Partners 
+                <a href="<?php echo admin_url('admin.php?page=skeepy-add-clinic'); ?>" class="page-title-action">Add New</a>
+            </h1>
+            
+            <!-- Filters -->
+            <div class="filters-bar">
+                <form method="get" action="">
+                    <input type="hidden" name="page" value="skeepy-clinics">
+                    <div class="filters-row">
+                        <input type="text" name="search" placeholder="Search clinics, representatives, provider IDs..." value="<?php echo esc_attr($search); ?>" style="width: 300px;">
+                        
+                        <select name="status">
+                            <option value="">All Statuses</option>
+                            <option value="pending" <?php selected($status_filter, 'pending'); ?>>Pending</option>
+                            <option value="approved" <?php selected($status_filter, 'approved'); ?>>Approved</option>
+                            <option value="rejected" <?php selected($status_filter, 'rejected'); ?>>Rejected</option>
+                        </select>
+                        
+                        <input type="text" name="location" placeholder="Location..." value="<?php echo esc_attr($location_filter); ?>" style="width: 150px;">
+                        
+                        <button type="submit" class="button">Filter</button>
+                        <a href="<?php echo admin_url('admin.php?page=skeepy-clinics'); ?>" class="button">Clear Filters</a>
+                    </div>
+                </form>
+            </div>
+            
+            <!-- Bulk Actions -->
+            <div class="bulk-actions-bar" id="bulk-actions-bar">
+                <div class="filters-row">
+                    <span>Selected: <span id="selected-count">0</span> items</span>
+                    <select id="bulk-action-select">
+                        <option value="">Bulk Actions</option>
+                        <option value="approve">Approve</option>
+                        <option value="reject">Reject</option>
+                        <option value="delete">Delete</option>
+                    </select>
+                    <button type="button" class="button" onclick="executeBulkAction()">Apply</button>
+                    <button type="button" class="button" onclick="clearSelection()">Clear Selection</button>
+                </div>
+            </div>
+            
+            <!-- Clinics Table -->
+            <div class="skeepy-detail-box">
+                <table class="skeepy-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 40px;">
+                                <input type="checkbox" id="select-all" onchange="toggleSelectAll(this)">
+                            </th>
+                            <th>Provider ID</th>
+                            <th>Clinic Name</th>
+                            <th>Representative</th>
+                            <th>Email</th>
+                            <th>Phone</th>
+                            <th>Location</th>
+                            <th>Status</th>
+                            <th>Application Date</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if ($clinics): ?>
+                            <?php foreach ($clinics as $clinic): ?>
+                            <tr>
+                                <td>
+                                    <input type="checkbox" class="clinic-checkbox" value="<?php echo $clinic->id; ?>" onchange="updateBulkActions()">
+                                </td>
+                                <td><strong><?php echo esc_html($clinic->provider_id); ?></strong></td>
+                                <td><?php echo esc_html($clinic->clinic_name); ?></td>
+                                <td><?php echo esc_html($clinic->rep_first_name . ' ' . $clinic->rep_last_name); ?></td>
+                                <td><?php echo esc_html($clinic->clinic_email); ?></td>
+                                <td><?php echo esc_html($clinic->clinic_phone); ?></td>
+                                <td><?php echo esc_html(substr($clinic->clinic_address, 0, 30) . '...'); ?></td>
+                                <td>
+                                    <span class="skeepy-status status-<?php echo esc_attr($clinic->application_status); ?>">
+                                        <?php echo esc_html(ucfirst($clinic->application_status)); ?>
+                                    </span>
+                                </td>
+                                <td><?php echo date('M j, Y', strtotime($clinic->application_date)); ?></td>
+                                <td>
+                                    <div class="skeepy-actions">
+                                        <button class="skeepy-btn btn-primary" onclick="viewClinicDetails(<?php echo $clinic->id; ?>)">View</button>
+                                        <?php if ($clinic->application_status === 'pending'): ?>
+                                            <button class="skeepy-btn btn-success" onclick="updateClinicStatus(<?php echo $clinic->id; ?>, 'approved')">Approve</button>
+                                            <button class="skeepy-btn btn-danger" onclick="updateClinicStatus(<?php echo $clinic->id; ?>, 'rejected')">Reject</button>
+                                        <?php endif; ?>
+                                    </div>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                        <?php else: ?>
+                            <tr>
+                                <td colspan="10" style="text-align: center; padding: 40px; color: #666;">
+                                    No clinics found matching your criteria.
+                                </td>
+                            </tr>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+                
+                <!-- Pagination -->
+                <?php if ($total_pages > 1): ?>
+                <div style="margin-top: 20px; text-align: center;">
+                    <?php
+                    $page_links = paginate_links(array(
+                        'base' => add_query_arg('paged', '%#%'),
+                        'format' => '',
+                        'prev_text' => __('&laquo; Previous'),
+                        'next_text' => __('Next &raquo;'),
+                        'total' => $total_pages,
+                        'current' => $current_page
+                    ));
+                    echo $page_links;
+                    ?>
+                    <p style="margin-top: 10px; color: #666;">
+                        Showing <?php echo (($current_page - 1) * $per_page + 1); ?> to <?php echo min($current_page * $per_page, $total_items); ?> of <?php echo $total_items; ?> entries
+                    </p>
+                </div>
+                <?php endif; ?>
+            </div>
+        </div>
+        
+        <script>
+        let selectedClinics = [];
+        
+        function toggleSelectAll(checkbox) {
+            const checkboxes = document.querySelectorAll('.clinic-checkbox');
+            checkboxes.forEach(cb => {
+                cb.checked = checkbox.checked;
+            });
+            updateBulkActions();
+        }
+        
+        function updateBulkActions() {
+            const checkboxes = document.querySelectorAll('.clinic-checkbox:checked');
+            selectedClinics = Array.from(checkboxes).map(cb => cb.value);
+            
+            const bulkBar = document.getElementById('bulk-actions-bar');
+            const countSpan = document.getElementById('selected-count');
+            
+            if (selectedClinics.length > 0) {
+                bulkBar.classList.add('show');
+                countSpan.textContent = selectedClinics.length;
+            } else {
+                bulkBar.classList.remove('show');
+            }
+        }
+        
+        function clearSelection() {
+            document.querySelectorAll('.clinic-checkbox').forEach(cb => cb.checked = false);
+            document.getElementById('select-all').checked = false;
+            updateBulkActions();
+        }
+        
+        function executeBulkAction() {
+            const action = document.getElementById('bulk-action-select').value;
+            if (!action || selectedClinics.length === 0) {
+                alert('Please select an action and at least one clinic.');
+                return;
+            }
+            
+            if (confirm('Are you sure you want to ' + action + ' the selected clinics?')) {
+                jQuery.post(ajaxurl, {
+                    action: 'skeepy_bulk_action',
+                    bulk_action: action,
+                    clinic_ids: selectedClinics,
+                    nonce: '<?php echo wp_create_nonce('skeepy_admin_nonce'); ?>'
+                }, function(response) {
+                    if (response.success) {
+                        location.reload();
+                    } else {
+                        alert('Error: ' + response.data);
+                    }
+                });
+            }
+        }
+        
+        function viewClinicDetails(clinicId) {
+            jQuery.post(ajaxurl, {
+                action: 'skeepy_get_clinic_details',
+                clinic_id: clinicId,
+                nonce: '<?php echo wp_create_nonce('skeepy_admin_nonce'); ?>'
+            }, function(response) {
+                if (response.success) {
+                    document.getElementById('modal-body-content').innerHTML = response.data;
+                    document.getElementById('skeepy-modal').style.display = 'block';
+                }
+            });
+        }
+        
+        function updateClinicStatus(clinicId, status) {
+            if (confirm('Are you sure you want to update this clinic status?')) {
+                jQuery.post(ajaxurl, {
+                    action: 'skeepy_update_status',
+                    table: 'clinics',
+                    record_id: clinicId,
+                    status: status,
+                    nonce: '<?php echo wp_create_nonce('skeepy_admin_nonce'); ?>'
+                }, function(response) {
+                    if (response.success) {
+                        location.reload();
+                    } else {
+                        alert('Error: ' + response.data);
+                    }
+                });
+            }
+        }
+        </script>
+        <?php
+    }
+    
+    // Claims page with enhanced benefit integration
+    public function claims_page() {
+        global $wpdb;
+        
+        $claims_table = $wpdb->prefix . 'skeepy_claims';
+        
+        // Handle filters
+        $where_clause = "WHERE 1=1";
+        $search = isset($_GET['search']) ? sanitize_text_field($_GET['search']) : '';
+        $status_filter = isset($_GET['status']) ? sanitize_text_field($_GET['status']) : '';
+        $date_from = isset($_GET['date_from']) ? sanitize_text_field($_GET['date_from']) : '';
+        $date_to = isset($_GET['date_to']) ? sanitize_text_field($_GET['date_to']) : '';
+        
+        if ($search) {
+            $where_clause .= $wpdb->prepare(" AND (claim_id LIKE %s OR clinic_name LIKE %s OR patient_hmo_id LIKE %s)", 
+                '%' . $search . '%', '%' . $search . '%', '%' . $search . '%');
+        }
+        
+        if ($status_filter) {
+            $where_clause .= $wpdb->prepare(" AND status = %s", $status_filter);
+        }
+        
+        if ($date_from) {
+            $where_clause .= $wpdb->prepare(" AND DATE(submission_date) >= %s", $date_from);
+        }
+        
+        if ($date_to) {
+            $where_clause .= $wpdb->prepare(" AND DATE(submission_date) <= %s", $date_to);
+        }
+        
+        // Pagination
+        $per_page = 20;
+        $current_page = isset($_GET['paged']) ? max(1, intval($_GET['paged'])) : 1;
+        $offset = ($current_page - 1) * $per_page;
+        
+        // Get total count
+        $total_claims = $wpdb->get_var("SELECT COUNT(*) FROM $claims_table $where_clause");
+        $total_pages = ceil($total_claims / $per_page);
+        
+        // Get claims
+        $claims = $wpdb->get_results("SELECT * FROM $claims_table $where_clause ORDER BY submission_date DESC LIMIT $per_page OFFSET $offset");
+        
+        ?>
+        <div class="wrap skeepy-admin-wrap">
+            <h1>Claims Management</h1>
+            
+            <!-- Filters -->
+            <div class="filters-bar">
+                <form method="get">
+                    <input type="hidden" name="page" value="skeepy-claims">
+                    <div class="filters-row">
+                        <input type="text" name="search" placeholder="Search claims..." value="<?php echo esc_attr($search); ?>">
+                        
+                        <select name="status">
+                            <option value="">All Statuses</option>
+                            <option value="pending" <?php selected($status_filter, 'pending'); ?>>Pending</option>
+                            <option value="approved" <?php selected($status_filter, 'approved'); ?>>Approved</option>
+                            <option value="rejected" <?php selected($status_filter, 'rejected'); ?>>Rejected</option>
+                            <option value="paid" <?php selected($status_filter, 'paid'); ?>>Paid</option>
+                        </select>
+                        
+                        <input type="date" name="date_from" value="<?php echo esc_attr($date_from); ?>" placeholder="From Date">
+                        <input type="date" name="date_to" value="<?php echo esc_attr($date_to); ?>" placeholder="To Date">
+                        
+                        <button type="submit" class="button">Filter</button>
+                        <a href="<?php echo admin_url('admin.php?page=skeepy-claims'); ?>" class="button">Clear</a>
+                    </div>
+                </form>
+            </div>
+            
+            <!-- Claims Table -->
+            <div class="skeepy-detail-box">
+                <table class="skeepy-table">
+                    <thead>
+                        <tr>
+                            <th>Claim ID</th>
+                            <th>Submission Date</th>
+                            <th>HMO ID</th>
+                            <th>Clinic</th>
+                            <th>Veterinarian</th>
+                            <th>Amount</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if ($claims): ?>
+                            <?php foreach ($claims as $claim): ?>
+                            <tr>
+                                <td><?php echo esc_html($claim->claim_id); ?></td>
+                                <td><?php echo date('M j, Y', strtotime($claim->submission_date)); ?></td>
+                                <td><?php echo esc_html($claim->patient_hmo_id); ?></td>
+                                <td><?php echo esc_html($claim->clinic_name); ?></td>
+                                <td><?php echo esc_html($claim->veterinarian_name); ?></td>
+                                <td class="claim-amount">₦<?php echo number_format((float)str_replace(array('₦', ','), '', $claim->total_amount)); ?></td>
+                                <td><span class="skeepy-status status-<?php echo esc_attr($claim->status); ?>"><?php echo esc_html(ucfirst($claim->status)); ?></span></td>
+                                <td>
+                                    <div class="skeepy-actions">
+                                        <button class="skeepy-btn btn-primary" onclick="viewClaimDetails(<?php echo $claim->id; ?>)">View</button>
+                                        <?php if ($claim->status === 'pending'): ?>
+                                            <button class="skeepy-btn btn-success" onclick="approveClaim(<?php echo $claim->id; ?>)">Approve</button>
+                                            <button class="skeepy-btn btn-danger" onclick="rejectClaim(<?php echo $claim->id; ?>)">Reject</button>
+                                        <?php elseif ($claim->status === 'approved'): ?>
+                                            <button class="skeepy-btn btn-success" onclick="updateClaimStatus(<?php echo $claim->id; ?>, 'paid')">Mark Paid</button>
+                                        <?php endif; ?>
+                                        <?php if (!empty($claim->patient_hmo_id)): ?>
+                                            <button class="skeepy-btn btn-info" onclick="viewBenefitStatus('<?php echo esc_js($claim->patient_hmo_id); ?>')">Benefits</button>
+                                        <?php endif; ?>
+                                    </div>
+                                </td>
+                            </tr>
+                            <?php endforeach; ?>
+                        <?php else: ?>
+                            <tr>
+                                <td colspan="8" style="text-align: center; padding: 40px;">No claims found.</td>
+                            </tr>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+                
+                <!-- Pagination -->
+                <?php if ($total_pages > 1): ?>
+                <div style="margin-top: 20px; text-align: center;">
+                    <?php
+                    $page_links = paginate_links(array(
+                        'base' => add_query_arg('paged', '%#%'),
+                        'format' => '',
+                        'prev_text' => '&laquo; Previous',
+                        'next_text' => 'Next &raquo;',
+                        'total' => $total_pages,
+                        'current' => $current_page
+                    ));
+                    echo $page_links;
+                    ?>
+                </div>
+                <?php endif; ?>
+            </div>
+        </div>
+        
+        <script>
+        function viewClaimDetails(claimId) {
+            jQuery.post(ajaxurl, {
+                action: 'skeepy_get_claim_details',
+                claim_id: claimId,
+                nonce: '<?php echo wp_create_nonce('skeepy_admin_nonce'); ?>'
+            }, function(response) {
+                if (response.success) {
+                    document.getElementById('modal-body-content').innerHTML = response.data;
+                    document.getElementById('skeepy-modal').style.display = 'block';
+                }
+            });
+        }
+        
+        function approveClaim(claimId) {
+            if (confirm('Are you sure you want to approve this claim? Benefits will be automatically deducted from the patient\'s plan.')) {
+                jQuery.post(ajaxurl, {
+                    action: 'skeepy_approve_claim',
+                    claim_id: claimId,
+                    nonce: '<?php echo wp_create_nonce('skeepy_admin_nonce'); ?>'
+                }, function(response) {
+                    if (response.success) {
+                        alert('✅ Claim approved successfully!\n\nBenefits have been automatically deducted from the patient\'s annual coverage.');
+                        location.reload();
+                    } else {
+                        alert('❌ Error: ' + response.data);
+                    }
+                });
+            }
+        }
+        
+        function rejectClaim(claimId) {
+            if (confirm('Are you sure you want to reject this claim?')) {
+                jQuery.post(ajaxurl, {
+                    action: 'skeepy_reject_claim',
+                    claim_id: claimId,
+                    nonce: '<?php echo wp_create_nonce('skeepy_admin_nonce'); ?>'
+                }, function(response) {
+                    if (response.success) {
+                        location.reload();
+                    } else {
+                        alert('Error: ' + response.data);
+                    }
+                });
+            }
+        }
+        
+        function updateClaimStatus(claimId, status) {
+            if (confirm('Are you sure you want to update this claim status?')) {
+                jQuery.post(ajaxurl, {
+                    action: 'skeepy_update_status',
+                    table: 'claims',
+                    record_id: claimId,
+                    status: status,
+                    nonce: '<?php echo wp_create_nonce('skeepy_admin_nonce'); ?>'
+                }, function(response) {
+                    if (response.success) {
+                        location.reload();
+                    } else {
+                        alert('Error: ' + response.data);
+                    }
+                });
+            }
+        }
+        
+        // Reuse the benefit status function from pets page
+        function viewBenefitStatus(hmoId) {
+            jQuery.post(ajaxurl, {
+                action: 'skeepy_get_benefit_status',
+                hmo_id: hmoId,
+                nonce: '<?php echo wp_create_nonce('skeepy_admin_nonce'); ?>'
+            }, function(response) {
+                if (response.success) {
+                    displayBenefitStatusModal(response.data);
+                } else {
+                    alert('Error loading benefit status: ' + response.data);
+                }
+            });
+        }
+        
+        function displayBenefitStatusModal(benefitData) {
+            const usagePercentage = (benefitData.total_coverage_used / benefitData.total_coverage_limit * 100).toFixed(1);
+            const progressClass = usagePercentage > 80 ? 'high' : usagePercentage > 60 ? 'medium' : 'low';
+            
+            let html = `
+                <div class="benefit-status-box">
+                    <h4 style="margin: 0 0 15px 0; color: #145362;">Benefit Status - ${benefitData.pet.plan_type.toUpperCase()} Plan</h4>
+                    
+                    <div style="margin-bottom: 20px;">
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                            <span><strong>Annual Coverage:</strong></span>
+                            <span style="font-weight: 600;">₦${benefitData.remaining_coverage.toLocaleString()} / ₦${benefitData.total_coverage_limit.toLocaleString()}</span>
+                        </div>
+                        <div class="benefit-progress">
+                            <div class="benefit-progress-bar ${progressClass}" style="width: ${usagePercentage}%;"></div>
+                        </div>
+                        <div style="font-size: 12px; color: #6b7280; text-align: center;">${usagePercentage}% used (₦${benefitData.total_coverage_used.toLocaleString()} of ₦${benefitData.total_coverage_limit.toLocaleString()})</div>
+                    </div>
+                    
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                        <div>
+                            <strong>Pet Information:</strong><br>
+                            Name: ${benefitData.pet.pet_name}<br>
+                            Type: ${benefitData.pet.pet_type}<br>
+                            HMO ID: ${benefitData.pet.hmo_id}
+                        </div>
+                        <div>
+                            <strong>Plan Details:</strong><br>
+                            Plan: ${benefitData.pet.plan_type.toUpperCase()}<br>
+                            Status: ${benefitData.pet.plan_status}<br>
+                            Remaining: ₦${benefitData.remaining_coverage.toLocaleString()}
+                        </div>
+                    </div>
+            `;
+            
+            // Service usage details
+            if (Object.keys(benefitData.service_usage).length > 0) {
+                html += `
+                    <div style="margin-top: 20px;">
+                        <h5 style="margin: 0 0 10px 0; color: #145362;">Service Usage This Year:</h5>
+                        <div style="max-height: 200px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 4px; padding: 10px;">
+                `;
+                
+                for (const [serviceName, usage] of Object.entries(benefitData.service_usage)) {
+                    const planService = benefitData.plan_benefits.services[serviceName];
+                    let limitText = '';
+                    let statusColor = '#10b981';
+                    
+                    if (planService) {
+                        if (planService.type === 'count') {
+                            const remaining = planService.limit - usage.used_count;
+                            limitText = `${usage.used_count}/${planService.limit} times`;
+                            statusColor = remaining <= 0 ? '#dc2626' : remaining <= 1 ? '#f59e0b' : '#10b981';
+                        } else if (planService.type === 'amount') {
+                            limitText = `₦${usage.used_amount.toLocaleString()} used`;
+                            statusColor = '#10b981';
+                        } else {
+                            limitText = `${usage.used_count} times (unlimited)`;
+                            statusColor = '#10b981';
+                        }
+                    } else {
+                        limitText = `₦${usage.used_amount.toLocaleString()} used`;
+                    }
+                    
+                    html += `
+                        <div style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #f3f4f6;">
+                            <span style="color: #374151;">${serviceName.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}</span>
+                            <span style="color: ${statusColor}; font-weight: 600;">${limitText}</span>
+                        </div>
+                    `;
+                }
+                
+                html += `</div></div>`;
+            } else {
+                html += `
+                    <div style="margin-top: 20px; text-align: center; color: #666; font-style: italic;">
+                        No services used yet this year.
+                    </div>
+                `;
+            }
+            
+            html += `</div>`;
+            
+            document.getElementById('modal-body-content').innerHTML = html;
+            document.getElementById('skeepy-modal').style.display = 'block';
+        }
+        </script>
+        <?php
+    }
+    
+    public function add_pet_page() {
+        ?>
+        <div class="wrap skeepy-admin-wrap">
+            <h1>Add New Pet Registration</h1>
+            
+            <div class="skeepy-detail-box">
+                <form method="post" action="" id="add-pet-form">
+                    <?php wp_nonce_field('skeepy_add_pet_nonce', 'add_pet_nonce'); ?>
+                    
+                    <div class="detail-grid">
+                        <div class="detail-item">
+                            <label class="detail-label">Pet Name *</label>
+                            <input type="text" name="pet_name" required style="width: 100%;">
+                        </div>
+                        
+                        <div class="detail-item">
+                            <label class="detail-label">Pet Type *</label>
+                            <select name="pet_type" required style="width: 100%;">
+                                <option value="">Select Type</option>
+                                <option value="dog">Dog</option>
+                                <option value="cat">Cat</option>
+                            </select>
+                        </div>
+                        
+                        <div class="detail-item">
+                            <label class="detail-label">Pet Breed</label>
+                            <input type="text" name="pet_breed" style="width: 100%;">
+                        </div>
+                        
+                        <div class="detail-item">
+                            <label class="detail-label">Pet Gender</label>
+                            <select name="pet_gender" style="width: 100%;">
+                                <option value="">Select Gender</option>
+                                <option value="male">Male</option>
+                                <option value="female">Female</option>
+                            </select>
+                        </div>
+                        
+                        <div class="detail-item">
+                            <label class="detail-label">Pet Age</label>
+                            <input type="number" name="pet_age" min="0" style="width: 100%;">
+                        </div>
+                        
+                        <div class="detail-item">
+                            <label class="detail-label">Pet Color</label>
+                            <input type="text" name="pet_color" style="width: 100%;">
+                        </div>
+                        
+                        <div class="detail-item">
+                            <label class="detail-label">Guardian First Name *</label>
+                            <input type="text" name="guardian_first_name" required style="width: 100%;">
+                        </div>
+                        
+                        <div class="detail-item">
+                            <label class="detail-label">Guardian Surname *</label>
+                            <input type="text" name="guardian_surname" required style="width: 100%;">
+                        </div>
+                        
+                        <div class="detail-item">
+                            <label class="detail-label">Guardian Email *</label>
+                            <input type="email" name="guardian_email" required style="width: 100%;">
+                        </div>
+                        
+                        <div class="detail-item">
+                            <label class="detail-label">Guardian Phone *</label>
+                            <input type="tel" name="guardian_phone" required style="width: 100%;">
+                        </div>
+                        
+                        <div class="detail-item">
+                            <label class="detail-label">Guardian Address</label>
+                            <textarea name="guardian_address" style="width: 100%; height: 80px;"></textarea>
+                        </div>
+                        
+                        <div class="detail-item">
+                            <label class="detail-label">Plan Type *</label>
+                            <select name="plan_type" required style="width: 100%;">
+                                <option value="">Select Plan</option>
+                                <option value="pawtastic">Pawtastic (₦8,000/month)</option>
+                                <option value="furrtastic">Furrtastic (₦16,000/month)</option>
+                                <option value="purrfect">Purrfect (₦32,000/month)</option>
+                            </select>
+                        </div>
+                        
+                        <div class="detail-item">
+                            <label class="detail-label">Plan Duration *</label>
+                            <select name="plan_duration" required style="width: 100%;">
+                                <option value="">Select Duration</option>
+                                <option value="monthly">Monthly</option>
+                                <option value="quarterly">Quarterly</option>
+                                <option value="annual">Annual</option>
+                            </select>
+                        </div>
+                        
+                        <div class="detail-item">
+                            <label class="detail-label">Plan Status</label>
+                            <select name="plan_status" style="width: 100%;">
+                                <option value="pending">Pending</option>
+                                <option value="active">Active</option>
+                                <option value="cancelled">Cancelled</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <div style="margin-top: 30px;">
+                        <button type="submit" class="button button-primary">Add Pet Registration</button>
+                        <a href="<?php echo admin_url('admin.php?page=skeepy-pets'); ?>" class="button">Cancel</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+        
+        <?php
+        // Handle form submission
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && wp_verify_nonce($_POST['add_pet_nonce'], 'skeepy_add_pet_nonce')) {
+            global $wpdb;
+            
+            // Generate HMO ID
+            $hmo_id = 'SKEEPYHMO-' . strtoupper(wp_generate_password(6, false));
+            
+            // Calculate coverage limit based on plan type
+            $coverage_limits = array(
+                'pawtastic' => 360000,
+                'furrtastic' => 1200000,
+                'purrfect' => 2200000
+            );
+            
+            $plan_type = sanitize_text_field($_POST['plan_type']);
+            $coverage_limit = isset($coverage_limits[$plan_type]) ? $coverage_limits[$plan_type] : 360000;
+            
+            $result = $wpdb->insert(
+                $wpdb->prefix . 'skeepy_pets',
+                array(
+                    'hmo_id' => $hmo_id,
+                    'pet_name' => sanitize_text_field($_POST['pet_name']),
+                    'pet_type' => sanitize_text_field($_POST['pet_type']),
+                    'pet_breed' => sanitize_text_field($_POST['pet_breed']),
+                    'pet_gender' => sanitize_text_field($_POST['pet_gender']),
+                    'pet_age' => intval($_POST['pet_age']),
+                    'pet_color' => sanitize_text_field($_POST['pet_color']),
+                    'guardian_first_name' => sanitize_text_field($_POST['guardian_first_name']),
+                    'guardian_surname' => sanitize_text_field($_POST['guardian_surname']),
+                    'guardian_email' => sanitize_email($_POST['guardian_email']),
+                    'guardian_phone' => sanitize_text_field($_POST['guardian_phone']),
+                    'guardian_address' => sanitize_textarea_field($_POST['guardian_address']),
+                    'plan_type' => $plan_type,
+                    'plan_duration' => sanitize_text_field($_POST['plan_duration']),
+                    'plan_status' => sanitize_text_field($_POST['plan_status']),
+                    'coverage_limit' => $coverage_limit,
+                    'registration_date' => current_time('mysql')
+                )
+            );
+            
+            if ($result) {
+                echo '<div class="notice notice-success"><p>Pet registration added successfully! HMO ID: ' . $hmo_id . '</p></div>';
+            } else {
+                echo '<div class="notice notice-error"><p>Error adding pet registration. Please try again.</p></div>';
+            }
+        }
+    }
+    
+    public function add_clinic_page() {
+        ?>
+        <div class="wrap skeepy-admin-wrap">
+            <h1>Add New Clinic Partner</h1>
+            
+            <div class="skeepy-detail-box">
+                <form method="post" action="" id="add-clinic-form">
+                    <?php wp_nonce_field('skeepy_add_clinic_nonce', 'add_clinic_nonce'); ?>
+                    
+                    <div class="detail-grid">
+                        <div class="detail-item">
+                            <label class="detail-label">Clinic Name *</label>
+                            <input type="text" name="clinic_name" required style="width: 100%;">
+                        </div>
+                        
+                        <div class="detail-item">
+                            <label class="detail-label">Clinic Email *</label>
+                            <input type="email" name="clinic_email" required style="width: 100%;">
+                        </div>
+                        
+                        <div class="detail-item">
+                            <label class="detail-label">Clinic Phone *</label>
+                            <input type="tel" name="clinic_phone" required style="width: 100%;">
+                        </div>
+                        
+                        <div class="detail-item">
+                            <label class="detail-label">Clinic Address *</label>
+                            <textarea name="clinic_address" required style="width: 100%; height: 80px;"></textarea>
+                        </div>
+                        
+                        <div class="detail-item">
+                            <label class="detail-label">Representative First Name *</label>
+                            <input type="text" name="rep_first_name" required style="width: 100%;">
+                        </div>
+                        
+                        <div class="detail-item">
+                            <label class="detail-label">Representative Last Name *</label>
+                            <input type="text" name="rep_last_name" required style="width: 100%;">
+                        </div>
+                        
+                        <div class="detail-item">
+                            <label class="detail-label">Job Title</label>
+                            <input type="text" name="job_title" style="width: 100%;">
+                        </div>
+                        
+                        <div class="detail-item">
+                            <label class="detail-label">VCN Number</label>
+                            <input type="text" name="vcn_number" style="width: 100%;">
+                        </div>
+                        
+                        <div class="detail-item">
+                            <label class="detail-label">Application Status</label>
+                            <select name="application_status" style="width: 100%;">
+                                <option value="pending">Pending</option>
+                                <option value="approved">Approved</option>
+                                <option value="rejected">Rejected</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <div style="margin-top: 20px;">
+                        <label class="detail-label">Services Offered</label>
+                        <textarea name="services_offered" style="width: 100%; height: 100px;" placeholder="Enter services separated by commas"></textarea>
+                    </div>
+                    
+                    <div style="margin-top: 30px;">
+                        <button type="submit" class="button button-primary">Add Clinic Partner</button>
+                        <a href="<?php echo admin_url('admin.php?page=skeepy-clinics'); ?>" class="button">Cancel</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+        
+        <?php
+        // Handle form submission
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && wp_verify_nonce($_POST['add_clinic_nonce'], 'skeepy_add_clinic_nonce')) {
+            global $wpdb;
+            
+            // Generate Provider ID
+            $provider_id = 'SKEEPYCL-' . strtoupper(wp_generate_password(6, false));
+            
+            $result = $wpdb->insert(
+                $wpdb->prefix . 'skeepy_clinics',
+                array(
+                    'provider_id' => $provider_id,
+                    'clinic_name' => sanitize_text_field($_POST['clinic_name']),
+                    'clinic_email' => sanitize_email($_POST['clinic_email']),
+                    'clinic_phone' => sanitize_text_field($_POST['clinic_phone']),
+                    'clinic_address' => sanitize_textarea_field($_POST['clinic_address']),
+                    'rep_first_name' => sanitize_text_field($_POST['rep_first_name']),
+                    'rep_last_name' => sanitize_text_field($_POST['rep_last_name']),
+                    'job_title' => sanitize_text_field($_POST['job_title']),
+                    'vcn_number' => sanitize_text_field($_POST['vcn_number']),
+                    'services_offered' => sanitize_textarea_field($_POST['services_offered']),
+                    'application_status' => sanitize_text_field($_POST['application_status']),
+                    'application_date' => current_time('mysql')
+                )
+            );
+            
+            if ($result) {
+                echo '<div class="notice notice-success"><p>Clinic partner added successfully! Provider ID: ' . $provider_id . '</p></div>';
+            } else {
+                echo '<div class="notice notice-error"><p>Error adding clinic partner. Please try again.</p></div>';
+            }
+        }
+    }
+    
+    public function reports_page() {
+        global $wpdb;
+        
+        // Get date range for filters
+        $date_from = isset($_GET['date_from']) ? sanitize_text_field($_GET['date_from']) : date('Y-m-01');
+        $date_to = isset($_GET['date_to']) ? sanitize_text_field($_GET['date_to']) : date('Y-m-d');
+        
+        // Summary statistics
+        $pets_table = $wpdb->prefix . 'skeepy_pets';
+        $clinics_table = $wpdb->prefix . 'skeepy_clinics';
+        $claims_table = $wpdb->prefix . 'skeepy_claims';
+        
+        $total_pets = $wpdb->get_var("SELECT COUNT(*) FROM $pets_table WHERE DATE(registration_date) BETWEEN '$date_from' AND '$date_to'");
+        $total_clinics = $wpdb->get_var("SELECT COUNT(*) FROM $clinics_table WHERE DATE(application_date) BETWEEN '$date_from' AND '$date_to'");
+        $total_claims = $wpdb->get_var("SELECT COUNT(*) FROM $claims_table WHERE DATE(submission_date) BETWEEN '$date_from' AND '$date_to'");
+        $total_revenue = (float) $wpdb->get_var("SELECT SUM(CAST(REPLACE(REPLACE(total_amount, '₦', ''), ',', '') AS DECIMAL(10,2))) FROM $claims_table WHERE status IN ('approved', 'paid') AND DATE(submission_date) BETWEEN '$date_from' AND '$date_to'");
+        
+        // Monthly breakdown
+        $monthly_data = $wpdb->get_results("
+            SELECT 
+                DATE_FORMAT(registration_date, '%Y-%m') as month,
+                COUNT(*) as pet_registrations,
+                (SELECT COUNT(*) FROM $clinics_table WHERE DATE_FORMAT(application_date, '%Y-%m') = DATE_FORMAT(p.registration_date, '%Y-%m')) as clinic_applications,
+                (SELECT COUNT(*) FROM $claims_table WHERE DATE_FORMAT(submission_date, '%Y-%m') = DATE_FORMAT(p.registration_date, '%Y-%m')) as claims_submitted,
+                (SELECT SUM(CAST(REPLACE(REPLACE(total_amount, '₦', ''), ',', '') AS DECIMAL(10,2))) FROM $claims_table WHERE status IN ('approved', 'paid') AND DATE_FORMAT(submission_date, '%Y-%m') = DATE_FORMAT(p.registration_date, '%Y-%m')) as revenue
+            FROM $pets_table p 
+            WHERE DATE(registration_date) BETWEEN '$date_from' AND '$date_to'
+            GROUP BY DATE_FORMAT(registration_date, '%Y-%m')
+            ORDER BY month DESC
+        ");
+        
+        ?>
+        <div class="wrap skeepy-admin-wrap">
+            <h1>Reports & Analytics</h1>
+            
+            <!-- Date Filter -->
+            <div class="filters-bar">
+                <form method="get">
+                    <input type="hidden" name="page" value="skeepy-reports">
+                    <div class="filters-row">
+                        <label>Date Range:</label>
+                        <input type="date" name="date_from" value="<?php echo esc_attr($date_from); ?>">
+                        <input type="date" name="date_to" value="<?php echo esc_attr($date_to); ?>">
+                        <button type="submit" class="button">Generate Report</button>
+                        <a href="<?php echo admin_url('admin.php?page=skeepy-reports'); ?>" class="button">Reset</a>
+                    </div>
+                </form>
+            </div>
+            
+            <!-- Summary Cards -->
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin: 20px 0;">
+                <div class="skeepy-detail-box" style="text-align: center;">
+                    <h3 style="margin: 0; color: #0073aa;">Pet Registrations</h3>
+                    <p style="font-size: 32px; margin: 10px 0; font-weight: bold;"><?php echo $total_pets; ?></p>
+                    <p style="margin: 0; color: #666;">In Selected Period</p>
+                </div>
+                
+                <div class="skeepy-detail-box" style="text-align: center;">
+                    <h3 style="margin: 0; color: #28a745;">Clinic Applications</h3>
+                    <p style="font-size: 32px; margin: 10px 0; font-weight: bold;"><?php echo $total_clinics; ?></p>
+                    <p style="margin: 0; color: #666;">In Selected Period</p>
+                </div>
+                
+                <div class="skeepy-detail-box" style="text-align: center;">
+                    <h3 style="margin: 0; color: #dc3545;">Claims Submitted</h3>
+                    <p style="font-size: 32px; margin: 10px 0; font-weight: bold;"><?php echo $total_claims; ?></p>
+                    <p style="margin: 0; color: #666;">In Selected Period</p>
+                </div>
+                
+                <div class="skeepy-detail-box" style="text-align: center;">
+                    <h3 style="margin: 0; color: #ffc107;">Total Revenue</h3>
+                    <p style="font-size: 32px; margin: 10px 0; font-weight: bold;">₦<?php echo number_format($total_revenue ?: 0); ?></p>
+                    <p style="margin: 0; color: #666;">Approved Claims</p>
+                </div>
+            </div>
+            
+            <!-- Monthly Breakdown -->
+            <div class="skeepy-detail-box">
+                <h3>Monthly Breakdown</h3>
+                <table class="skeepy-table">
+                    <thead>
+                        <tr>
+                            <th>Month</th>
+                            <th>Pet Registrations</th>
+                            <th>Clinic Applications</th>
+                            <th>Claims Submitted</th>
+                            <th>Revenue</th>
+                            <th>Profit (30%)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php if ($monthly_data): ?>
+                            <?php foreach ($monthly_data as $data): ?>
+                            <tr>
+                                <td><?php echo date('F Y', strtotime($data->month . '-01')); ?></td>
+                                <td><?php echo $data->pet_registrations; ?></td>
+                                <td><?php echo $data->clinic_applications ?: 0; ?></td>
+                                <td><?php echo $data->claims_submitted ?: 0; ?></td>
+                                <td>₦<?php echo number_format((float)($data->revenue ?: 0)); ?></td>
+                                <td>₦<?php echo number_format((float)(($data->revenue ?: 0) * 0.3)); ?></td>
+                            </tr>
+                            <?php endforeach; ?>
+                        <?php else: ?>
+                            <tr>
+                                <td colspan="6" style="text-align: center; padding: 40px;">No data found for the selected period.</td>
+                            </tr>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+            
+            <!-- Export Options -->
+            <div class="skeepy-detail-box">
+                <h3>Export Data</h3>
+                <div class="filters-row">
+                    <button type="button" class="button" onclick="exportData('pets', 'csv')">Export Pets (CSV)</button>
+                    <button type="button" class="button" onclick="exportData('clinics', 'csv')">Export Clinics (CSV)</button>
+                    <button type="button" class="button" onclick="exportData('claims', 'csv')">Export Claims (CSV)</button>
+                    <button type="button" class="button" onclick="exportData('report', 'pdf')">Export Report (PDF)</button>
+                </div>
+            </div>
+        </div>
+        
+        <script>
+        function exportData(type, format) {
+            const params = new URLSearchParams({
+                action: 'skeepy_export_data',
+                export_type: type,
+                export_format: format,
+                date_from: '<?php echo $date_from; ?>',
+                date_to: '<?php echo $date_to; ?>',
+                nonce: '<?php echo wp_create_nonce('skeepy_admin_nonce'); ?>'
+            });
+            
+            window.location.href = ajaxurl + '?' + params.toString();
+        }
+        </script>
+        <?php
+    }
+    
+    // AJAX Handlers
+    public function ajax_delete_record() {
+        check_ajax_referer('skeepy_admin_nonce', 'nonce');
+        
+        if (!current_user_can('administrator')) {
+            wp_die('Unauthorized');
+        }
+        
+        global $wpdb;
+        $table = sanitize_text_field($_POST['table']);
+        $record_id = intval($_POST['record_id']);
+        
+        $table_name = $wpdb->prefix . 'skeepy_' . $table;
+        
+        $result = $wpdb->delete(
+            $table_name,
+            array('id' => $record_id),
+            array('%d')
+        );
+        
+        if ($result !== false) {
+            wp_send_json_success('Record deleted successfully');
+        } else {
+            wp_send_json_error('Failed to delete record');
+        }
+    }
+    
+    public function ajax_approve_application() {
+        check_ajax_referer('skeepy_admin_nonce', 'nonce');
+        
+        if (!current_user_can('administrator')) {
+            wp_die('Unauthorized');
+        }
+        
+        // Implementation for application approval
+        wp_send_json_success('Application approved successfully');
+    }
+    
+    public function ajax_update_status() {
+        check_ajax_referer('skeepy_admin_nonce', 'nonce');
+        
+        if (!current_user_can('administrator')) {
+            wp_die('Unauthorized');
+        }
+        
+        global $wpdb;
+        $table = sanitize_text_field($_POST['table']);
+        $record_id = intval($_POST['record_id']);
+        $status = sanitize_text_field($_POST['status']);
+        
+        $table_name = $wpdb->prefix . 'skeepy_' . $table;
+        
+        // Determine the status field based on table
+        if ($table === 'pets') {
+            $status_field = 'plan_status';
+        } elseif ($table === 'clinics') {
+            $status_field = 'application_status';
+        } else {
+            $status_field = 'status';
+        }
+        
+        $result = $wpdb->update(
+            $table_name,
+            array($status_field => $status),
+            array('id' => $record_id),
+            array('%s'),
+            array('%d')
+        );
+        
+        if ($result !== false) {
+            wp_send_json_success('Status updated successfully');
+        } else {
+            wp_send_json_error('Failed to update status');
+        }
+    }
+    
+    public function ajax_bulk_action() {
+        check_ajax_referer('skeepy_admin_nonce', 'nonce');
+        
+        if (!current_user_can('administrator')) {
+            wp_die('Unauthorized');
+        }
+        
+        $bulk_action = sanitize_text_field($_POST['bulk_action']);
+        $pet_ids = isset($_POST['pet_ids']) ? array_map('intval', $_POST['pet_ids']) : array();
+        $clinic_ids = isset($_POST['clinic_ids']) ? array_map('intval', $_POST['clinic_ids']) : array();
+        
+        global $wpdb;
+        $success_count = 0;
+        
+        if (!empty($pet_ids)) {
+            foreach ($pet_ids as $pet_id) {
+                if ($bulk_action === 'activate') {
+                    $result = $wpdb->update(
+                        $wpdb->prefix . 'skeepy_pets',
+                        array('plan_status' => 'active'),
+                        array('id' => $pet_id),
+                        array('%s'),
+                        array('%d')
+                    );
+                } elseif ($bulk_action === 'deactivate') {
+                    $result = $wpdb->update(
+                        $wpdb->prefix . 'skeepy_pets',
+                        array('plan_status' => 'cancelled'),
+                        array('id' => $pet_id),
+                        array('%s'),
+                        array('%d')
+                    );
+                } elseif ($bulk_action === 'delete') {
+                    $result = $wpdb->delete(
+                        $wpdb->prefix . 'skeepy_pets',
+                        array('id' => $pet_id),
+                        array('%d')
+                    );
+                }
+                
+                if ($result !== false) {
+                    $success_count++;
+                }
+            }
+        }
+        
+        if (!empty($clinic_ids)) {
+            foreach ($clinic_ids as $clinic_id) {
+                if ($bulk_action === 'approve') {
+                    $result = $wpdb->update(
+                        $wpdb->prefix . 'skeepy_clinics',
+                        array('application_status' => 'approved'),
+                        array('id' => $clinic_id),
+                        array('%s'),
+                        array('%d')
+                    );
+                } elseif ($bulk_action === 'reject') {
+                    $result = $wpdb->update(
+                        $wpdb->prefix . 'skeepy_clinics',
+                        array('application_status' => 'rejected'),
+                        array('id' => $clinic_id),
+                        array('%s'),
+                        array('%d')
+                    );
+                } elseif ($bulk_action === 'delete') {
+                    $result = $wpdb->delete(
+                        $wpdb->prefix . 'skeepy_clinics',
+                        array('id' => $clinic_id),
+                        array('%d')
+                    );
+                }
+                
+                if ($result !== false) {
+                    $success_count++;
+                }
+            }
+        }
+        
+        wp_send_json_success("Successfully processed $success_count records");
+    }
+    
+    public function ajax_get_pet_details() {
+        check_ajax_referer('skeepy_admin_nonce', 'nonce');
+        
+        if (!current_user_can('administrator')) {
+            wp_die('Unauthorized');
+        }
+        
+        global $wpdb;
+        $pet_id = intval($_POST['pet_id']);
+        $pets_table = $wpdb->prefix . 'skeepy_pets';
+        
+        $pet = $wpdb->get_row($wpdb->prepare("SELECT * FROM $pets_table WHERE id = %d", $pet_id));
+        
+        if (!$pet) {
+            wp_send_json_error('Pet not found');
+            return;
+        }
+        
+        $html = '<div class="detail-grid">';
+        $html .= '<div class="detail-item"><div class="detail-label">HMO ID:</div><div class="detail-value">' . esc_html($pet->hmo_id) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Pet Name:</div><div class="detail-value">' . esc_html($pet->pet_name) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Pet Type:</div><div class="detail-value">' . esc_html(ucfirst($pet->pet_type)) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Breed:</div><div class="detail-value">' . esc_html($pet->pet_breed) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Gender:</div><div class="detail-value">' . esc_html(ucfirst($pet->pet_gender)) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Age:</div><div class="detail-value">' . esc_html($pet->pet_age) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Color:</div><div class="detail-value">' . esc_html($pet->pet_color) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Guardian Name:</div><div class="detail-value">' . esc_html($pet->guardian_first_name . ' ' . $pet->guardian_surname) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Guardian Email:</div><div class="detail-value">' . esc_html($pet->guardian_email) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Guardian Phone:</div><div class="detail-value">' . esc_html($pet->guardian_phone) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Guardian Address:</div><div class="detail-value">' . esc_html($pet->guardian_address) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Plan Type:</div><div class="detail-value">' . esc_html(ucfirst($pet->plan_type)) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Plan Duration:</div><div class="detail-value">' . esc_html(ucfirst($pet->plan_duration)) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Plan Status:</div><div class="detail-value"><span class="skeepy-status status-' . esc_attr($pet->plan_status) . '">' . esc_html(ucfirst($pet->plan_status)) . '</span></div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Registration Date:</div><div class="detail-value">' . date('M j, Y g:i A', strtotime($pet->registration_date)) . '</div></div>';
+        $html .= '</div>';
+        
+        wp_send_json_success($html);
+    }
+    
+    public function ajax_get_clinic_details() {
+        check_ajax_referer('skeepy_admin_nonce', 'nonce');
+        
+        if (!current_user_can('administrator')) {
+            wp_die('Unauthorized');
+        }
+        
+        global $wpdb;
+        $clinic_id = intval($_POST['clinic_id']);
+        $clinics_table = $wpdb->prefix . 'skeepy_clinics';
+        
+        $clinic = $wpdb->get_row($wpdb->prepare("SELECT * FROM $clinics_table WHERE id = %d", $clinic_id));
+        
+        if (!$clinic) {
+            wp_send_json_error('Clinic not found');
+            return;
+        }
+        
+        $html = '<div class="detail-grid">';
+        $html .= '<div class="detail-item"><div class="detail-label">Provider ID:</div><div class="detail-value">' . esc_html($clinic->provider_id) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Clinic Name:</div><div class="detail-value">' . esc_html($clinic->clinic_name) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Email:</div><div class="detail-value">' . esc_html($clinic->clinic_email) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Phone:</div><div class="detail-value">' . esc_html($clinic->clinic_phone) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Address:</div><div class="detail-value">' . esc_html($clinic->clinic_address) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Representative:</div><div class="detail-value">' . esc_html($clinic->rep_first_name . ' ' . $clinic->rep_last_name) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Job Title:</div><div class="detail-value">' . esc_html($clinic->job_title) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">VCN Number:</div><div class="detail-value">' . esc_html($clinic->vcn_number) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Application Status:</div><div class="detail-value"><span class="skeepy-status status-' . esc_attr($clinic->application_status) . '">' . esc_html(ucfirst($clinic->application_status)) . '</span></div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Application Date:</div><div class="detail-value">' . date('M j, Y g:i A', strtotime($clinic->application_date)) . '</div></div>';
+        $html .= '</div>';
+        
+        if ($clinic->services_offered) {
+            $html .= '<div style="margin-top: 20px;">';
+            $html .= '<h4>Services Offered</h4>';
+            
+            // Try to decode as JSON first
+            $services_data = json_decode($clinic->services_offered, true);
+            if (is_array($services_data)) {
+                $html .= '<div class="services-grid">';
+                foreach ($services_data as $service_data) {
+                    if (is_array($service_data) && isset($service_data['service'])) {
+                        $html .= '<div class="service-item">' . esc_html($service_data['service']) . '</div>';
+                    }
+                }
+                $html .= '</div>';
+            } else {
+                // Simple comma-separated format
+                $services = explode(',', $clinic->services_offered);
+                $html .= '<div class="services-grid">';
+                foreach ($services as $service) {
+                    $html .= '<div class="service-item">' . esc_html(trim($service)) . '</div>';
+                }
+                $html .= '</div>';
+            }
+            $html .= '</div>';
+        }
+        
+        wp_send_json_success($html);
+    }
+    
+    public function ajax_get_claim_details() {
+        check_ajax_referer('skeepy_admin_nonce', 'nonce');
+        
+        if (!current_user_can('administrator')) {
+            wp_die('Unauthorized');
+        }
+        
+        global $wpdb;
+        $claim_id = intval($_POST['claim_id']);
+        $claims_table = $wpdb->prefix . 'skeepy_claims';
+        
+        $claim = $wpdb->get_row($wpdb->prepare("SELECT * FROM $claims_table WHERE id = %d", $claim_id));
+        
+        if (!$claim) {
+            wp_send_json_error('Claim not found');
+            return;
+        }
+        
+        $html = '<div class="detail-grid">';
+        $html .= '<div class="detail-item"><div class="detail-label">Claim ID:</div><div class="detail-value">' . esc_html($claim->claim_id) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">HMO ID:</div><div class="detail-value">' . esc_html($claim->patient_hmo_id) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Clinic Name:</div><div class="detail-value">' . esc_html($claim->clinic_name) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Provider ID:</div><div class="detail-value">' . esc_html($claim->provider_id) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Veterinarian:</div><div class="detail-value">' . esc_html($claim->veterinarian_name) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Treatment Date:</div><div class="detail-value">' . date('M j, Y', strtotime($claim->treatment_date)) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Submission Date:</div><div class="detail-value">' . date('M j, Y g:i A', strtotime($claim->submission_date)) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Total Amount:</div><div class="detail-value claim-amount">₦' . number_format((float)str_replace(array('₦', ','), '', $claim->total_amount)) . '</div></div>';
+        $html .= '<div class="detail-item"><div class="detail-label">Status:</div><div class="detail-value"><span class="skeepy-status status-' . esc_attr($claim->status) . '">' . esc_html(ucfirst($claim->status)) . '</span></div></div>';
+        $html .= '</div>';
+        
+        $html .= '<div style="margin-top: 20px;">';
+        $html .= '<h4>Symptoms</h4>';
+        $html .= '<p>' . esc_html($claim->symptoms) . '</p>';
+        $html .= '</div>';
+        
+        $html .= '<div style="margin-top: 20px;">';
+        $html .= '<h4>Diagnosis</h4>';
+        $html .= '<p>' . esc_html($claim->diagnosis) . '</p>';
+        $html .= '</div>';
+        
+        $html .= '<div style="margin-top: 20px;">';
+        $html .= '<h4>Treatment</h4>';
+        $html .= '<p>' . esc_html($claim->treatment) . '</p>';
+        $html .= '</div>';
+        
+        $html .= '<div style="margin-top: 20px;">';
+        $html .= '<h4>Services Provided</h4>';
+        
+        // Parse services (could be JSON or simple string)
+        $services_data = json_decode($claim->services, true);
+        if (is_array($services_data)) {
+            $html .= '<div class="services-grid">';
+            foreach ($services_data as $service) {
+                $service_name = is_array($service) ? ($service['service'] ?? $service['name'] ?? 'Unknown') : $service;
+                $html .= '<div class="service-item">' . esc_html($service_name) . '</div>';
+            }
+            $html .= '</div>';
+        } else {
+            $html .= '<p>' . esc_html($claim->services) . '</p>';
+        }
+        $html .= '</div>';
+        
+        // Add benefit deduction button if claim is approved but benefits not deducted
+        if ($claim->status === 'approved' && !empty($claim->patient_hmo_id)) {
+            // Check if benefits already deducted
+            $usage_exists = $wpdb->get_var($wpdb->prepare(
+                "SELECT id FROM {$wpdb->prefix}skeepy_benefit_usage WHERE claim_id = %s",
+                $claim->claim_id
+            ));
+            
+            if (!$usage_exists) {
+                $html .= '<div style="margin-top: 20px; padding: 15px; background: #fff3cd; border-radius: 8px;">';
+                $html .= '<h4 style="color: #856404; margin: 0 0 10px 0;">Benefit Deduction</h4>';
+                $html .= '<p style="color: #856404; margin: 0 0 15px 0;">This claim has been approved but benefits have not been deducted yet.</p>';
+                $html .= '<button class="skeepy-btn btn-warning" onclick="manualBenefitDeduction(' . $claim->id . ')">Deduct Benefits Now</button>';
+                $html .= '</div>';
+            } else {
+                $html .= '<div style="margin-top: 20px; padding: 15px; background: #d4edda; border-radius: 8px;">';
+                $html .= '<h4 style="color: #155724; margin: 0 0 10px 0;">✅ Benefits Deducted</h4>';
+                $html .= '<p style="color: #155724; margin: 0;">Benefits have been successfully deducted from the patient\'s plan.</p>';
+                $html .= '</div>';
+            }
+        }
+        
+        wp_send_json_success($html);
+    }
+    
+    // ENHANCED: This is the key function that now includes automatic benefit deduction
+    public function ajax_approve_claim() {
+        check_ajax_referer('skeepy_admin_nonce', 'nonce');
+        
+        if (!current_user_can('administrator')) {
+            wp_die('Unauthorized');
+        }
+        
+        global $wpdb;
+        $claim_id = intval($_POST['claim_id']);
+        $claims_table = $wpdb->prefix . 'skeepy_claims';
+        
+        // Get the claim details first
+        $claim = $wpdb->get_row($wpdb->prepare("SELECT * FROM $claims_table WHERE id = %d", $claim_id));
+        
+        if (!$claim) {
+            wp_send_json_error('Claim not found');
+            return;
+        }
+        
+        // Update claim status to approved
+        $result = $wpdb->update(
+            $claims_table,
+            array('status' => 'approved'),
+            array('id' => $claim_id),
+            array('%s'),
+            array('%d')
+        );
+        
+        if ($result !== false) {
+            // ENHANCED: Automatic benefit deduction
+            if (!empty($claim->patient_hmo_id)) {
+                $deduction_result = $this->benefit_tracker->deductBenefitUsage(
+                    $claim->patient_hmo_id,
+                    $claim->claim_id,
+                    $claim->services,
+                    $claim->total_amount
+                );
+                
+                if ($deduction_result) {
+                    error_log("Skeepy Admin: Successfully approved claim {$claim->claim_id} and deducted benefits for HMO {$claim->patient_hmo_id}");
+                    
+                    // Get updated benefit status for response
+                    $benefit_data = $this->benefit_tracker->calculateUsedBenefits($claim->patient_hmo_id);
+                    
+                    $response_message = "Claim approved and benefits deducted successfully!\n\n";
+                    if (!isset($benefit_data['error'])) {
+                        $response_message .= "Updated Coverage: ₦" . number_format($benefit_data['remaining_coverage']) . " / ₦" . number_format($benefit_data['total_coverage_limit']) . " remaining";
+                    }
+                    
+                    wp_send_json_success($response_message);
+                } else {
+                    error_log("Skeepy Admin: Approved claim {$claim->claim_id} but failed to deduct benefits for HMO {$claim->patient_hmo_id}");
+                    wp_send_json_success('Claim approved but benefit deduction failed - please check manually');
+                }
+            } else {
+                error_log("Skeepy Admin: Approved claim {$claim->claim_id} but no HMO ID found for benefit deduction");
+                wp_send_json_success('Claim approved but no HMO ID found for benefit deduction');
+            }
+        } else {
+            wp_send_json_error('Failed to approve claim');
+        }
+    }
+    
+    public function ajax_reject_claim() {
+        check_ajax_referer('skeepy_admin_nonce', 'nonce');
+        
+        if (!current_user_can('administrator')) {
+            wp_die('Unauthorized');
+        }
+        
+        global $wpdb;
+        $claim_id = intval($_POST['claim_id']);
+        $claims_table = $wpdb->prefix . 'skeepy_claims';
+        
+        $result = $wpdb->update(
+            $claims_table,
+            array('status' => 'rejected'),
+            array('id' => $claim_id),
+            array('%s'),
+            array('%d')
+        );
+        
+        if ($result !== false) {
+            wp_send_json_success('Claim rejected successfully');
+        } else {
+            wp_send_json_error('Failed to reject claim');
+        }
+    }
+    
+    // ADDED: Benefit status AJAX handler
+    public function ajax_get_benefit_status() {
+        check_ajax_referer('skeepy_admin_nonce', 'nonce');
+        
+        if (!current_user_can('administrator')) {
+            wp_die('Unauthorized');
+        }
+        
+        $hmo_id = sanitize_text_field($_POST['hmo_id']);
+        
+        $benefit_data = $this->benefit_tracker->calculateUsedBenefits($hmo_id);
+        
+        if (isset($benefit_data['error'])) {
+            wp_send_json_error($benefit_data['error']);
+        } else {
+            wp_send_json_success($benefit_data);
+        }
+    }
+    
+    // ADDED: Manual benefit deduction handler
+    public function ajax_manual_benefit_deduction() {
+        check_ajax_referer('skeepy_admin_nonce', 'nonce');
+        
+        if (!current_user_can('administrator')) {
+            wp_die('Unauthorized');
+        }
+        
+        global $wpdb;
+        $claim_id = intval($_POST['claim_id']);
+        $claims_table = $wpdb->prefix . 'skeepy_claims';
+        
+        // Get claim details
+        $claim = $wpdb->get_row($wpdb->prepare("SELECT * FROM $claims_table WHERE id = %d", $claim_id));
+        
+        if (!$claim) {
+            wp_send_json_error('Claim not found');
+            return;
+        }
+        
+        if (empty($claim->patient_hmo_id)) {
+            wp_send_json_error('No HMO ID found for this claim');
+            return;
+        }
+        
+        // Perform benefit deduction
+        $result = $this->benefit_tracker->deductBenefitUsage(
+            $claim->patient_hmo_id,
+            $claim->claim_id,
+            $claim->services,
+            $claim->total_amount
+        );
+        
+        if ($result) {
+            // Get updated benefit status
+            $benefit_data = $this->benefit_tracker->calculateUsedBenefits($claim->patient_hmo_id);
+            
+            $response_message = "Benefits deducted successfully!\n\n";
+            if (!isset($benefit_data['error'])) {
+                $response_message .= "Updated Coverage: ₦" . number_format($benefit_data['remaining_coverage']) . " / ₦" . number_format($benefit_data['total_coverage_limit']) . " remaining";
+            }
+            
+            wp_send_json_success($response_message);
+        } else {
+            wp_send_json_error('Failed to deduct benefits - may already be processed');
+        }
+    }
+}
+
+// Initialize the admin interface
+new SkeepyAdminInterface();
+

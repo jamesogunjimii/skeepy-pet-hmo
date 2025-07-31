@@ -1,0 +1,486 @@
+/**
+ * Fixed Skeepy Pet Sign In Shortcode
+ * Use: [skeepy_pet_signin]
+ * Properly handles authentication with pet signup system
+ */
+
+// Register shortcode
+add_shortcode('skeepy_pet_signin', 'skeepy_pet_signin_form');
+
+function skeepy_pet_signin_form() {
+    $login_error = '';
+    $show_success = false;
+    
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['pet_login'])) {
+        $login_input = sanitize_text_field($_POST['email_username']);
+        $password = $_POST['password'];
+        
+        // Find user by email or username
+        $user = false;
+        if (is_email($login_input)) {
+            $user = get_user_by('email', $login_input);
+        } else {
+            $user = get_user_by('login', $login_input);
+        }
+        
+        if (!$user) {
+            $login_error = 'No account found with this email or username.';
+        } elseif (!in_array('skeepy_pet_parent', $user->roles)) {
+            $login_error = 'Access denied. This login is for pet parents only.';
+        } else {
+            // Attempt authentication
+            $credentials = array(
+                'user_login' => $user->user_login,
+                'user_password' => $password,
+                'remember' => isset($_POST['remember_me'])
+            );
+            
+            $authenticated_user = wp_signon($credentials, false);
+            
+            if (is_wp_error($authenticated_user)) {
+                $login_error = 'Invalid password. Please check your credentials and try again.';
+            } else {
+                // Successfully authenticated
+                wp_set_current_user($authenticated_user->ID);
+                wp_set_auth_cookie($authenticated_user->ID, isset($_POST['remember_me']));
+                
+                // Set flag to show success page with meta refresh
+                $show_success = true;
+            }
+        }
+    }
+
+    // Check if already logged in
+    $current_user = wp_get_current_user();
+    $is_logged_in = is_user_logged_in() && in_array('skeepy_pet_parent', $current_user->roles);
+
+    // If logged in, get pet data for display
+    $pet_info = null;
+    if ($is_logged_in) {
+        global $wpdb;
+        $pets_table = $wpdb->prefix . 'skeepy_pets';
+        $pet_info = $wpdb->get_row($wpdb->prepare(
+            "SELECT * FROM $pets_table WHERE guardian_email = %s OR wordpress_user_id = %d ORDER BY registration_date DESC LIMIT 1",
+            $current_user->user_email,
+            $current_user->ID
+        ));
+    }
+
+    ob_start();
+    ?>
+    <?php if ($show_success): ?>
+        <!-- Meta refresh redirect page -->
+        <meta http-equiv="refresh" content="2;url=/pet-dashboard">
+        <div style="text-align: center; padding: 60px 20px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+            <div style="max-width: 500px; margin: 0 auto; background: #f0fdf4; border: 1px solid #16a34a; border-radius: 12px; padding: 40px;">
+                <h2 style="color: #16a34a; margin-bottom: 20px; font-size: 24px;">✓ Login Successful!</h2>
+                <p style="color: #166534; font-size: 16px; margin-bottom: 20px;">
+                    Welcome back! You are now signed in to your Skeepy Pet Parent account.
+                </p>
+                <p style="color: #166534; font-size: 14px;">
+                    Redirecting you to your pet dashboard in 2 seconds...
+                </p>
+                <div style="margin-top: 30px;">
+                    <a href="/pet-dashboard" style="background: #145362; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600;">
+                        Go to Dashboard Now
+                    </a>
+                </div>
+            </div>
+        </div>
+    <?php else: ?>
+    
+    <div class="skeepy-pet-signin-container">
+        <style>
+            .skeepy-pet-signin-container * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+
+            .skeepy-pet-signin-container {
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                max-width: 900px;
+                margin: 40px auto;
+                padding: 20px;
+            }
+
+            .skeepy-login-container {
+                background: white;
+                border-radius: 20px;
+                box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+                overflow: hidden;
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                min-height: 600px;
+            }
+
+            .skeepy-login-form-section {
+                padding: 60px 50px;
+                display: flex;
+                flex-direction: column;
+                justify-content: center;
+            }
+
+            .skeepy-brand-section {
+                background: linear-gradient(135deg, #145362 0%, #1e7490 100%);
+                color: white;
+                padding: 60px 50px;
+                display: flex;
+                flex-direction: column;
+                justify-content: center;
+                align-items: center;
+                text-align: center;
+                position: relative;
+                overflow: hidden;
+            }
+
+            .skeepy-brand-section::before {
+                content: '';
+                position: absolute;
+                top: -50%;
+                right: -50%;
+                width: 200%;
+                height: 200%;
+                background: url('data:image/svg+xml,<svg width="60" height="60" xmlns="http://www.w3.org/2000/svg"><circle cx="30" cy="30" r="2" fill="rgba(255,255,255,0.1)"/></svg>') repeat;
+                animation: skeepyFloat 20s infinite linear;
+            }
+
+            @keyframes skeepyFloat {
+                0% { transform: translateX(0) translateY(0); }
+                100% { transform: translateX(-60px) translateY(-60px); }
+            }
+
+            .skeepy-logo {
+                max-width: 250px;
+                height: auto;
+                position: relative;
+                z-index: 1;
+            }
+
+            .skeepy-login-header {
+                text-align: center;
+                margin-bottom: 40px;
+            }
+
+            .skeepy-login-title {
+                font-size: 32px;
+                font-weight: 700;
+                color: #145362;
+                margin-bottom: 10px;
+            }
+
+            .skeepy-login-subtitle {
+                color: #6b7280;
+                font-size: 16px;
+            }
+
+            .skeepy-form-group {
+                margin-bottom: 25px;
+            }
+
+            .skeepy-form-label {
+                display: block;
+                font-weight: 600;
+                color: #145362;
+                margin-bottom: 8px;
+                font-size: 16px;
+            }
+
+            .skeepy-form-input {
+                width: 100%;
+                padding: 18px 20px;
+                border: 2px solid #e5e7eb;
+                border-radius: 12px;
+                font-size: 16px;
+                transition: all 0.3s ease;
+                background: #fafafa;
+            }
+
+            .skeepy-form-input:focus {
+                outline: none;
+                border-color: #145362;
+                background: white;
+                box-shadow: 0 0 0 3px rgba(20, 83, 98, 0.1);
+            }
+
+            .skeepy-form-input.error {
+                border-color: #ef4444;
+                background: #fef2f2;
+            }
+
+            .skeepy-checkbox-group {
+                display: flex;
+                align-items: center;
+                margin-bottom: 30px;
+            }
+
+            .skeepy-checkbox-input {
+                margin-right: 10px;
+                transform: scale(1.2);
+            }
+
+            .skeepy-checkbox-label {
+                color: #6b7280;
+                font-size: 14px;
+            }
+
+            .skeepy-login-button {
+                width: 100%;
+                background: linear-gradient(135deg, #145362 0%, #1e7490 100%);
+                color: white;
+                border: none;
+                padding: 18px;
+                border-radius: 12px;
+                font-size: 18px;
+                font-weight: 600;
+                cursor: pointer;
+                transition: all 0.3s ease;
+                margin-bottom: 20px;
+            }
+
+            .skeepy-login-button:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 10px 20px rgba(20, 83, 98, 0.3);
+            }
+
+            .skeepy-login-button:disabled {
+                opacity: 0.6;
+                cursor: not-allowed;
+                transform: none;
+            }
+
+            .skeepy-error-message {
+                background: #fef2f2;
+                color: #dc2626;
+                padding: 15px;
+                border-radius: 8px;
+                margin-bottom: 20px;
+                border-left: 4px solid #dc2626;
+                font-weight: 500;
+            }
+
+            .skeepy-success-message {
+                background: #f0fdf4;
+                color: #16a34a;
+                padding: 15px;
+                border-radius: 8px;
+                margin-bottom: 20px;
+                border-left: 4px solid #16a34a;
+                font-weight: 500;
+            }
+
+            .skeepy-help-links {
+                margin-top: 30px;
+                display: flex;
+                flex-direction: column;
+                gap: 15px;
+                align-items: center;
+            }
+
+            .skeepy-help-link {
+                color: #145362;
+                text-decoration: none;
+                font-size: 14px;
+                padding: 10px 20px;
+                border: 1px solid #e5e7eb;
+                border-radius: 8px;
+                background: #f9fafb;
+                transition: all 0.3s ease;
+                width: 100%;
+                max-width: 200px;
+                text-align: center;
+            }
+
+            .skeepy-help-link:hover {
+                background: #145362;
+                color: white;
+                border-color: #145362;
+                text-decoration: none;
+            }
+
+            .skeepy-divider {
+                text-align: center;
+                margin: 30px 0;
+                position: relative;
+            }
+
+            .skeepy-divider::before {
+                content: '';
+                position: absolute;
+                top: 50%;
+                left: 0;
+                right: 0;
+                height: 1px;
+                background: #e5e7eb;
+            }
+
+            .skeepy-divider span {
+                background: white;
+                padding: 0 15px;
+                color: #6b7280;
+                font-size: 14px;
+            }
+
+            .skeepy-already-logged-in {
+                text-align: center;
+                padding: 40px;
+            }
+
+            .skeepy-welcome-message {
+                font-size: 24px;
+                color: #145362;
+                margin-bottom: 20px;
+                font-weight: 600;
+            }
+
+            .skeepy-user-info {
+                background: #f8fafc;
+                padding: 20px;
+                border-radius: 12px;
+                margin-bottom: 30px;
+            }
+
+            .skeepy-dashboard-button {
+                background: linear-gradient(135deg, #145362 0%, #1e7490 100%);
+                color: white;
+                border: none;
+                padding: 15px 30px;
+                border-radius: 8px;
+                font-size: 16px;
+                font-weight: 600;
+                cursor: pointer;
+                text-decoration: none;
+                display: inline-block;
+                margin-right: 15px;
+            }
+
+            .skeepy-logout-button {
+                background: #6b7280;
+                color: white;
+                border: none;
+                padding: 15px 30px;
+                border-radius: 8px;
+                font-size: 16px;
+                font-weight: 600;
+                cursor: pointer;
+                text-decoration: none;
+                display: inline-block;
+            }
+
+            @media (max-width: 768px) {
+                .skeepy-login-container {
+                    grid-template-columns: 1fr;
+                }
+
+                .skeepy-brand-section {
+                    padding: 40px 30px;
+                }
+
+                .skeepy-login-form-section {
+                    padding: 40px 30px;
+                }
+
+                .skeepy-logo {
+                    font-size: 36px;
+                }
+
+                .skeepy-login-title {
+                    font-size: 28px;
+                }
+            }
+        </style>
+
+        <div class="skeepy-login-container">
+            <div class="skeepy-brand-section">
+                <img src="https://www.skeepy.co/wp-content/uploads/2023/09/Skeepy-Web-Logo-light.png" alt="Skeepy Logo" class="skeepy-logo">
+            </div>
+
+            <div class="skeepy-login-form-section">
+                <?php if ($is_logged_in): ?>
+                    <div class="skeepy-already-logged-in">
+                        <div class="skeepy-welcome-message">Welcome back, <?php echo esc_html($current_user->display_name); ?>!</div>
+                        
+                        <div class="skeepy-user-info">
+                            <?php if ($pet_info): ?>
+                                <p><strong>HMO ID:</strong> <?php echo esc_html($pet_info->hmo_id); ?></p>
+                                <p><strong>Pet:</strong> <?php echo esc_html($pet_info->pet_name); ?></p>
+                                <p><strong>Plan:</strong> <?php echo esc_html(ucfirst($pet_info->plan_type)); ?></p>
+                            <?php else: ?>
+                                <p><strong>Email:</strong> <?php echo esc_html($current_user->user_email); ?></p>
+                            <?php endif; ?>
+                            <p><strong>Role:</strong> Pet Parent</p>
+                        </div>
+                        
+                        <a href="/pet-dashboard" class="skeepy-dashboard-button">Go to Dashboard</a>
+                        <a href="<?php echo wp_logout_url(get_permalink()); ?>" class="skeepy-logout-button">Logout</a>
+                    </div>
+                <?php else: ?>
+                    <div class="skeepy-login-header">
+                        <h1 class="skeepy-login-title">Welcome!</h1>
+                        <p class="skeepy-login-subtitle">Sign in to your Skeepy Pet Parent Dashboard</p>
+                    </div>
+
+                    <?php if ($login_error): ?>
+                        <div class="skeepy-error-message">
+                            <?php echo esc_html($login_error); ?>
+                        </div>
+                    <?php endif; ?>
+
+
+
+                    <form method="POST" action="" id="skeepy-pet-login-form">
+                        <div class="skeepy-form-group">
+                            <label for="skeepy-email-username" class="skeepy-form-label">Email or Username</label>
+                            <input 
+                                type="text" 
+                                id="skeepy-email-username" 
+                                name="email_username" 
+                                class="skeepy-form-input <?php echo $login_error ? 'error' : ''; ?>" 
+                                required
+                                value="<?php echo isset($_POST['email_username']) ? esc_attr($_POST['email_username']) : ''; ?>"
+                                placeholder="Enter your email address or username"
+                            >
+                        </div>
+
+                        <div class="skeepy-form-group">
+                            <label for="skeepy-password" class="skeepy-form-label">Password</label>
+                            <input 
+                                type="password" 
+                                id="skeepy-password" 
+                                name="password" 
+                                class="skeepy-form-input <?php echo $login_error ? 'error' : ''; ?>" 
+                                required
+                                placeholder="Enter your password"
+                            >
+                        </div>
+
+                        <div class="skeepy-checkbox-group">
+                            <input type="checkbox" id="skeepy-remember-me" name="remember_me" class="skeepy-checkbox-input">
+                            <label for="skeepy-remember-me" class="skeepy-checkbox-label">Remember me for 30 days</label>
+                        </div>
+
+                        <button type="submit" name="pet_login" class="skeepy-login-button">
+                            Sign In to Dashboard
+                        </button>
+                    </form>
+
+                    <div class="skeepy-divider">
+                        <span>Need Help?</span>
+                    </div>
+
+                    <div class="skeepy-help-links">
+                        <a href="https://www.skeepy.co/pet-forgot-password" class="skeepy-help-link">Forgot Password?</a>
+                        <a href="/pet-signup" class="skeepy-help-link">Register Your Pet</a>
+                        <a href="mailto:help@skeepy.co" class="skeepy-help-link">Contact Support</a>
+                    </div>
+                <?php endif; ?>
+            </div>
+        </div>
+    </div>
+    <?php endif; ?>
+
+
+    </div>
+    <?php
+    return ob_get_clean();
+}

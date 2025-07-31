@@ -1,0 +1,462 @@
+/**
+ * Plugin Name: Skeepy Admin Benefit Tools
+ * Description: Admin tools for managing benefit deductions
+ * Version: 1.0
+ * Author: Skeepy Support
+ */
+
+// Prevent direct access
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+// Add admin page
+add_action('admin_menu', 'skeepy_add_benefit_admin_page');
+
+function skeepy_add_benefit_admin_page() {
+    add_menu_page(
+        'Skeepy Benefit Tools',
+        'Benefit Tools',
+        'manage_options',
+        'skeepy-benefit-tools',
+        'skeepy_benefit_tools_page',
+        'dashicons-chart-pie',
+        30
+    );
+}
+
+function skeepy_benefit_tools_page() {
+    global $wpdb;
+    
+    // Process form submission
+    if (isset($_POST['process_claims']) && check_admin_referer('skeepy_process_claims')) {
+        $processed = skeepy_process_all_claims();
+        echo '<div class="notice notice-success"><p>Processed ' . $processed . ' claims.</p></div>';
+    }
+    
+    if (isset($_POST['reset_benefits']) && check_admin_referer('skeepy_reset_benefits')) {
+        $hmo_id = sanitize_text_field($_POST['hmo_id']);
+        $reset = skeepy_reset_benefits($hmo_id);
+        echo '<div class="notice notice-success"><p>Reset benefits for HMO ID: ' . $hmo_id . '</p></div>';
+    }
+    
+    if (isset($_POST['manual_deduction']) && check_admin_referer('skeepy_manual_deduction')) {
+        $hmo_id = sanitize_text_field($_POST['hmo_id']);
+        $claim_id = sanitize_text_field($_POST['claim_id']);
+        $service = sanitize_text_field($_POST['service']);
+        $amount = floatval($_POST['amount']);
+        
+        $result = skeepy_manual_deduction($hmo_id, $claim_id, $service, $amount);
+        
+        if ($result) {
+            echo '<div class="notice notice-success"><p>Successfully added deduction.</p></div>';
+        } else {
+            echo '<div class="notice notice-error"><p>Failed to add deduction.</p></div>';
+        }
+    }
+    
+    // Get usage table status
+    $usage_table = $wpdb->prefix . 'skeepy_benefit_usage';
+    $table_exists = $wpdb->get_var("SHOW TABLES LIKE '{$usage_table}'");
+    
+    // Get count of records in usage table
+    $usage_count = 0;
+    if ($table_exists) {
+        $usage_count = $wpdb->get_var("SELECT COUNT(*) FROM {$usage_table}");
+    }
+    
+    // Get count of approved claims
+    $claims_table = $wpdb->prefix . 'skeepy_claims';
+    $approved_claims = $wpdb->get_var("SELECT COUNT(*) FROM {$claims_table} WHERE status IN ('approved', 'paid')");
+    
+    // Get count of unprocessed claims
+    $unprocessed_claims = 0;
+    if ($table_exists) {
+        $unprocessed_claims = $wpdb->get_var("
+            SELECT COUNT(*) FROM {$claims_table} c
+            WHERE c.status IN ('approved', 'paid')
+            AND c.patient_hmo_id IS NOT NULL 
+            AND c.patient_hmo_id != ''
+            AND NOT EXISTS (
+                SELECT 1 FROM {$usage_table} u 
+                WHERE u.claim_id = c.claim_id
+            )
+        ");
+    }
+    
+    ?>
+    <div class="wrap">
+        <h1>Skeepy Benefit Tools</h1>
+        
+        <div class="card">
+            <h2>System Status</h2>
+            <table class="form-table">
+                <tr>
+                    <th>Benefit Usage Table</th>
+                    <td><?php echo $table_exists ? '<span style="color: green;">Exists</span>' : '<span style="color: red;">Missing</span>'; ?></td>
+                </tr>
+                <tr>
+                    <th>Benefit Usage Records</th>
+                    <td><?php echo $usage_count; ?></td>
+                </tr>
+                <tr>
+                    <th>Approved Claims</th>
+                    <td><?php echo $approved_claims; ?></td>
+                </tr>
+                <tr>
+                    <th>Unprocessed Claims</th>
+                    <td><?php echo $unprocessed_claims; ?></td>
+                </tr>
+            </table>
+        </div>
+        
+        <div class="card" style="margin-top: 20px;">
+            <h2>Process All Claims</h2>
+            <p>This will process all approved claims that haven't been deducted from benefits yet.</p>
+            <form method="post">
+                <?php wp_nonce_field('skeepy_process_claims'); ?>
+                <input type="submit" name="process_claims" value="Process All Claims" class="button button-primary">
+            </form>
+        </div>
+        
+        <div class="card" style="margin-top: 20px;">
+            <h2>Reset Benefits for HMO ID</h2>
+            <p>This will remove all benefit usage records for a specific HMO ID.</p>
+            <form method="post">
+                <?php wp_nonce_field('skeepy_reset_benefits'); ?>
+                <table class="form-table">
+                    <tr>
+                        <th>HMO ID</th>
+                        <td><input type="text" name="hmo_id" required></td>
+                    </tr>
+                </table>
+                <input type="submit" name="reset_benefits" value="Reset Benefits" class="button button-primary">
+            </form>
+        </div>
+        
+        <div class="card" style="margin-top: 20px;">
+            <h2>Manual Benefit Deduction</h2>
+            <p>Add a manual benefit deduction for a specific HMO ID.</p>
+            <form method="post">
+                <?php wp_nonce_field('skeepy_manual_deduction'); ?>
+                <table class="form-table">
+                    <tr>
+                        <th>HMO ID</th>
+                        <td><input type="text" name="hmo_id" required></td>
+                    </tr>
+                    <tr>
+                        <th>Claim ID</th>
+                        <td><input type="text" name="claim_id" required></td>
+                    </tr>
+                    <tr>
+                        <th>Service</th>
+                        <td>
+                            <select name="service" required>
+                                <option value="General Consultation">General Consultation</option>
+                                <option value="Vaccination">Vaccination</option>
+                                <option value="Deworming">Deworming</option>
+                                <option value="Surgery">Surgery</option>
+                                <option value="Grooming">Grooming</option>
+                                <option value="Emergency">Emergency</option>
+                            </select>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Amount</th>
+                        <td><input type="number" name="amount" step="0.01" required></td>
+                    </tr>
+                </table>
+                <input type="submit" name="manual_deduction" value="Add Deduction" class="button button-primary">
+            </form>
+        </div>
+        
+        <div class="card" style="margin-top: 20px;">
+            <h2>View Benefit Usage</h2>
+            <p>View benefit usage for a specific HMO ID.</p>
+            <form id="view-benefits-form">
+                <table class="form-table">
+                    <tr>
+                        <th>HMO ID</th>
+                        <td><input type="text" id="view-hmo-id" required></td>
+                    </tr>
+                </table>
+                <button type="button" id="view-benefits-btn" class="button button-primary">View Benefits</button>
+            </form>
+            
+            <div id="benefit-results" style="margin-top: 20px; display: none;">
+                <h3>Benefit Usage for <span id="result-hmo-id"></span></h3>
+                <div id="benefit-data"></div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+    jQuery(document).ready(function($) {
+        $('#view-benefits-btn').on('click', function() {
+            const hmoId = $('#view-hmo-id').val();
+            if (!hmoId) return;
+            
+            $('#view-benefits-btn').text('Loading...');
+            
+            $.ajax({
+                url: ajaxurl,
+                type: 'POST',
+                data: {
+                    action: 'skeepy_view_benefits',
+                    hmo_id: hmoId
+                },
+                success: function(response) {
+                    $('#view-benefits-btn').text('View Benefits');
+                    
+                    if (response.success) {
+                        $('#result-hmo-id').text(hmoId);
+                        
+                        let html = '<table class="widefat">';
+                        html += '<thead><tr><th>Service</th><th>Count</th><th>Amount</th><th>Claim ID</th><th>Date</th></tr></thead>';
+                        html += '<tbody>';
+                        
+                        if (response.data.length > 0) {
+                            response.data.forEach(function(item) {
+                                html += '<tr>';
+                                html += '<td>' + item.service_name + '</td>';
+                                html += '<td>' + item.usage_count + '</td>';
+                                html += '<td>₦' + parseFloat(item.amount_used).toLocaleString() + '</td>';
+                                html += '<td>' + item.claim_id + '</td>';
+                                html += '<td>' + item.usage_date + '</td>';
+                                html += '</tr>';
+                            });
+                        } else {
+                            html += '<tr><td colspan="5">No benefit usage found.</td></tr>';
+                        }
+                        
+                        html += '</tbody></table>';
+                        
+                        $('#benefit-data').html(html);
+                        $('#benefit-results').show();
+                    } else {
+                        alert('Error: ' + response.data);
+                    }
+                },
+                error: function() {
+                    $('#view-benefits-btn').text('View Benefits');
+                    alert('Failed to load benefit data.');
+                }
+            });
+        });
+    });
+    </script>
+    <?php
+}
+
+// Process all claims
+function skeepy_process_all_claims() {
+    global $wpdb;
+    
+    $usage_table = $wpdb->prefix . 'skeepy_benefit_usage';
+    $claims_table = $wpdb->prefix . 'skeepy_claims';
+    
+    // Create usage table if it doesn't exist
+    if ($wpdb->get_var("SHOW TABLES LIKE '{$usage_table}'") != $usage_table) {
+        $sql = "CREATE TABLE {$usage_table} (
+            id int(11) NOT NULL AUTO_INCREMENT,
+            hmo_id VARCHAR(50) NOT NULL,
+            service_name VARCHAR(100) NOT NULL,
+            usage_count INTEGER NOT NULL DEFAULT 1,
+            amount_used DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+            claim_id VARCHAR(50),
+            usage_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status VARCHAR(20) NOT NULL DEFAULT 'active',
+            plan_year INTEGER DEFAULT YEAR(CURDATE()),
+            PRIMARY KEY (id),
+            INDEX idx_hmo_year (hmo_id, plan_year),
+            INDEX idx_claim_id (claim_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+        
+        $wpdb->query($sql);
+    }
+    
+    // Get unprocessed approved claims
+    $unprocessed = $wpdb->get_results("
+        SELECT c.* FROM {$claims_table} c
+        WHERE c.status IN ('approved', 'paid')
+        AND c.patient_hmo_id IS NOT NULL 
+        AND c.patient_hmo_id != ''
+        AND NOT EXISTS (
+            SELECT 1 FROM {$usage_table} u 
+            WHERE u.claim_id = c.claim_id
+        )
+        ORDER BY c.submission_date DESC
+    ");
+    
+    $processed = 0;
+    foreach ($unprocessed as $claim) {
+        // Extract service name
+        $services_text = $claim->services ?: $claim->services_provided ?: '';
+        $service_name = skeepy_extract_service_name($services_text);
+        
+        // Clean amount value
+        $clean_amount = floatval(str_replace(['₦', ',', ' '], '', $claim->total_amount));
+        
+        // Insert usage record
+        $result = $wpdb->insert(
+            $usage_table,
+            array(
+                'hmo_id' => $claim->patient_hmo_id,
+                'service_name' => $service_name,
+                'usage_count' => 1,
+                'amount_used' => $clean_amount,
+                'claim_id' => $claim->claim_id,
+                'usage_date' => $claim->submission_date ?: current_time('mysql'),
+                'status' => 'active',
+                'plan_year' => date('Y', strtotime($claim->submission_date ?: 'now'))
+            ),
+            array('%s', '%s', '%d', '%f', '%s', '%s', '%s', '%d')
+        );
+        
+        if ($result) {
+            $processed++;
+        }
+    }
+    
+    return $processed;
+}
+
+// Reset benefits for HMO ID
+function skeepy_reset_benefits($hmo_id) {
+    global $wpdb;
+    
+    $usage_table = $wpdb->prefix . 'skeepy_benefit_usage';
+    
+    // Check if table exists
+    if ($wpdb->get_var("SHOW TABLES LIKE '{$usage_table}'") != $usage_table) {
+        return false;
+    }
+    
+    // Delete all usage records for this HMO ID
+    $result = $wpdb->delete(
+        $usage_table,
+        array('hmo_id' => $hmo_id),
+        array('%s')
+    );
+    
+    return $result;
+}
+
+// Manual benefit deduction
+function skeepy_manual_deduction($hmo_id, $claim_id, $service, $amount) {
+    global $wpdb;
+    
+    $usage_table = $wpdb->prefix . 'skeepy_benefit_usage';
+    
+    // Create usage table if it doesn't exist
+    if ($wpdb->get_var("SHOW TABLES LIKE '{$usage_table}'") != $usage_table) {
+        $sql = "CREATE TABLE {$usage_table} (
+            id int(11) NOT NULL AUTO_INCREMENT,
+            hmo_id VARCHAR(50) NOT NULL,
+            service_name VARCHAR(100) NOT NULL,
+            usage_count INTEGER NOT NULL DEFAULT 1,
+            amount_used DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+            claim_id VARCHAR(50),
+            usage_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status VARCHAR(20) NOT NULL DEFAULT 'active',
+            plan_year INTEGER DEFAULT YEAR(CURDATE()),
+            PRIMARY KEY (id),
+            INDEX idx_hmo_year (hmo_id, plan_year),
+            INDEX idx_claim_id (claim_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+        
+        $wpdb->query($sql);
+    }
+    
+    // Check if already exists
+    $exists = $wpdb->get_var($wpdb->prepare(
+        "SELECT id FROM {$usage_table} WHERE claim_id = %s",
+        $claim_id
+    ));
+    
+    if ($exists) {
+        // Update existing record
+        $result = $wpdb->update(
+            $usage_table,
+            array(
+                'service_name' => $service,
+                'amount_used' => $amount
+            ),
+            array('claim_id' => $claim_id),
+            array('%s', '%f'),
+            array('%s')
+        );
+    } else {
+        // Insert new record
+        $result = $wpdb->insert(
+            $usage_table,
+            array(
+                'hmo_id' => $hmo_id,
+                'service_name' => $service,
+                'usage_count' => 1,
+                'amount_used' => $amount,
+                'claim_id' => $claim_id,
+                'usage_date' => current_time('mysql'),
+                'status' => 'active',
+                'plan_year' => date('Y')
+            ),
+            array('%s', '%s', '%d', '%f', '%s', '%s', '%s', '%d')
+        );
+    }
+    
+    return $result !== false;
+}
+
+// View benefits AJAX handler
+add_action('wp_ajax_skeepy_view_benefits', 'skeepy_view_benefits_handler');
+
+function skeepy_view_benefits_handler() {
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error('Insufficient permissions');
+        return;
+    }
+    
+    global $wpdb;
+    
+    $hmo_id = sanitize_text_field($_POST['hmo_id']);
+    $usage_table = $wpdb->prefix . 'skeepy_benefit_usage';
+    
+    // Check if table exists
+    if ($wpdb->get_var("SHOW TABLES LIKE '{$usage_table}'") != $usage_table) {
+        wp_send_json_error('Benefit usage table does not exist');
+        return;
+    }
+    
+    // Get usage records
+    $usage_records = $wpdb->get_results($wpdb->prepare(
+        "SELECT * FROM {$usage_table} WHERE hmo_id = %s ORDER BY usage_date DESC",
+        $hmo_id
+    ));
+    
+    wp_send_json_success($usage_records);
+}
+
+// Helper function to extract service name
+function skeepy_extract_service_name($services_string) {
+    if (empty($services_string)) {
+        return 'General Consultation';
+    }
+    
+    $services_string = strtolower($services_string);
+    
+    if (stripos($services_string, 'consultation') !== false) {
+        return 'General Consultation';
+    } elseif (stripos($services_string, 'vaccination') !== false || stripos($services_string, 'vaccine') !== false) {
+        return 'Vaccination';
+    } elseif (stripos($services_string, 'deworming') !== false) {
+        return 'Deworming';
+    } elseif (stripos($services_string, 'surgery') !== false || stripos($services_string, 'spaying') !== false || stripos($services_string, 'neutering') !== false) {
+        return 'Surgery';
+    } elseif (stripos($services_string, 'grooming') !== false) {
+        return 'Grooming';
+    } elseif (stripos($services_string, 'emergency') !== false) {
+        return 'Emergency';
+    } else {
+        return 'General Consultation'; // Default
+    }
+}

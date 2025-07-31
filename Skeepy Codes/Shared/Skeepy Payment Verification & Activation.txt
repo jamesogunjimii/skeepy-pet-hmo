@@ -1,0 +1,87 @@
+add_action('wp_ajax_skeepy_verify_payment', 'handle_skeepy_payment_verification');
+add_action('wp_ajax_nopriv_skeepy_verify_payment', 'handle_skeepy_payment_verification');
+
+function handle_skeepy_payment_verification() {
+    $reference = sanitize_text_field($_POST['reference'] ?? '');
+    $pet_id = intval($_POST['pet_id'] ?? 0);
+    
+    if (empty($reference) || empty($pet_id)) {
+        wp_send_json_error('Invalid payment reference or pet ID');
+    }
+    
+    // Verify with Paystack
+    $secret_key = 'sk_live_76441baf41e022c2170a1bcbfb0fd11e85b23cc4';
+    
+    $response = wp_remote_get("https://api.paystack.co/transaction/verify/{$reference}", array(
+        'headers' => array(
+            'Authorization' => 'Bearer ' . $secret_key,
+            'Content-Type' => 'application/json'
+        )
+    ));
+    
+    if (is_wp_error($response)) {
+        wp_send_json_error('Payment verification failed');
+    }
+    
+    $body = wp_remote_retrieve_body($response);
+    $data = json_decode($body, true);
+    
+    if (!$data || !$data['status'] || $data['data']['status'] !== 'success') {
+        wp_send_json_error('Payment not confirmed');
+    }
+    
+    // Update pet status to active
+    global $wpdb;
+    $pets_table = $wpdb->prefix . 'skeepy_pets';
+    
+    $result = $wpdb->update(
+        $pets_table,
+        array(
+            'plan_status' => 'active',
+            'payment_reference' => $reference,
+            'payment_date' => current_time('mysql')
+        ),
+        array('id' => $pet_id),
+        array('%s', '%s', '%s'),
+        array('%d')
+    );
+    
+    if ($result === false) {
+        wp_send_json_error('Failed to update payment status');
+    }
+    
+    // Get pet data for response
+    $pet = $wpdb->get_row($wpdb->prepare(
+        "SELECT * FROM {$pets_table} WHERE id = %d",
+        $pet_id
+    ));
+    
+    if (!$pet) {
+        wp_send_json_error('Pet not found');
+    }
+    
+    // Send confirmation email
+    send_skeepy_payment_confirmation_email($pet);
+    
+    wp_send_json_success(array(
+        'hmo_id' => $pet->hmo_id,
+        'message' => 'Payment confirmed and account activated'
+    ));
+}
+
+function send_skeepy_payment_confirmation_email($pet) {
+    $subject = 'Payment Confirmed - Skeepy Pet Solutions';
+    $message = "Dear {$pet->guardian_first_name},\n\n";
+    $message .= "Your payment has been confirmed and {$pet->pet_name}'s HMO plan is now active!\n\n";
+    $message .= "Plan Details:\n";
+    $message .= "Pet: {$pet->pet_name}\n";
+    $message .= "HMO ID: {$pet->hmo_id}\n";
+    $message .= "Plan: " . ucfirst($pet->plan_type) . "\n";
+    $message .= "Coverage: ₦" . number_format($pet->coverage_limit) . " annually\n\n";
+    $message .= "You can now visit any of our partner veterinary clinics for services.\n\n";
+    $message .= "Access your dashboard: " . home_url('/pet-dashboard/') . "\n\n";
+    $message .= "Thank you for choosing Skeepy Pet Solutions!\n\n";
+    $message .= "Best regards,\nThe Skeepy Pet Solutions Team";
+    
+    wp_mail($pet->guardian_email, $subject, $message);
+}

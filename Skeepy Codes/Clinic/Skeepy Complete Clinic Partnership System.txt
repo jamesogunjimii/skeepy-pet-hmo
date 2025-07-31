@@ -1,0 +1,936 @@
+/**
+ * Complete Working Clinic System - Direct Form with WordPress User Creation
+ * Enhanced with professional email design matching pet signup styling
+ * All requested corrections implemented
+ */
+
+// Ensure clinic table exists with proper structure
+function skeepy_ensure_clinic_table() {
+    global $wpdb;
+    
+    $clinics_table = $wpdb->prefix . 'skeepy_clinics';
+    $charset_collate = $wpdb->get_charset_collate();
+    
+    // Check if table exists
+    $table_exists = $wpdb->get_var("SHOW TABLES LIKE '$clinics_table'");
+    
+    if ($table_exists != $clinics_table) {
+        // Create new table
+        $sql = "CREATE TABLE $clinics_table (
+            id int(11) NOT NULL AUTO_INCREMENT,
+            provider_id varchar(20) NOT NULL,
+            rep_first_name varchar(100) NOT NULL,
+            rep_last_name varchar(100) NOT NULL,
+            job_title varchar(100) NOT NULL,
+            clinic_name varchar(200) NOT NULL,
+            clinic_email varchar(100) NOT NULL,
+            clinic_phone varchar(20) NOT NULL,
+            clinic_address text NOT NULL,
+            vcn_number varchar(50) NOT NULL,
+            profile_picture varchar(255) DEFAULT '',
+            pets_served text NOT NULL,
+            services_offered longtext NOT NULL,
+            application_status varchar(20) DEFAULT 'pending',
+            application_date datetime DEFAULT CURRENT_TIMESTAMP,
+            wordpress_user_id int(11) DEFAULT NULL,
+            PRIMARY KEY (id),
+            UNIQUE KEY provider_id (provider_id)
+        ) $charset_collate;";
+        
+        require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+        dbDelta($sql);
+    } else {
+        // Table exists, check and add missing columns
+        $columns = $wpdb->get_results("DESCRIBE $clinics_table");
+        $column_names = array_column($columns, 'Field');
+        
+        $required_columns = [
+            'rep_first_name' => 'varchar(100) NOT NULL',
+            'rep_last_name' => 'varchar(100) NOT NULL',
+            'job_title' => 'varchar(100) NOT NULL',
+            'clinic_name' => 'varchar(200) NOT NULL',
+            'clinic_email' => 'varchar(100) NOT NULL',
+            'clinic_phone' => 'varchar(20) NOT NULL',
+            'clinic_address' => 'text NOT NULL',
+            'vcn_number' => 'varchar(50) NOT NULL',
+            'profile_picture' => 'varchar(255) DEFAULT \'\'',
+            'pets_served' => 'text NOT NULL',
+            'services_offered' => 'longtext NOT NULL',
+            'application_status' => 'varchar(20) DEFAULT \'pending\'',
+            'application_date' => 'datetime DEFAULT CURRENT_TIMESTAMP',
+            'wordpress_user_id' => 'int(11) DEFAULT NULL'
+        ];
+        
+        foreach ($required_columns as $column => $definition) {
+            if (!in_array($column, $column_names)) {
+                $wpdb->query("ALTER TABLE $clinics_table ADD COLUMN $column $definition");
+                if ($wpdb->last_error) {
+                    error_log("Error adding column $column: " . $wpdb->last_error);
+                }
+            }
+        }
+    }
+    
+    if ($wpdb->last_error) {
+        error_log('Clinic table error: ' . $wpdb->last_error);
+    }
+    
+    return true;
+}
+
+// Generate Provider ID - 4 letters and 2 numbers alternating (never consecutive same type)
+function skeepy_generate_provider_id() {
+    global $wpdb;
+    $clinics_table = $wpdb->prefix . 'skeepy_clinics';
+    
+    do {
+        $letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        $numbers = '0123456789';
+        $provider_id = 'SKEEPYCL-';
+        
+        // Generate 6 characters: 4 letters, 2 numbers, alternating (never consecutive same type)
+        $pattern = ['L', 'N', 'L', 'N', 'L', 'L']; // L=Letter, N=Number - ensures 4 letters, 2 numbers, no consecutive
+        
+        for ($i = 0; $i < 6; $i++) {
+            if ($pattern[$i] === 'L') {
+                $provider_id .= $letters[rand(0, strlen($letters) - 1)];
+            } else {
+                $provider_id .= $numbers[rand(0, strlen($numbers) - 1)];
+            }
+        }
+        
+        $existing = $wpdb->get_var($wpdb->prepare(
+            "SELECT provider_id FROM $clinics_table WHERE provider_id = %s", 
+            $provider_id
+        ));
+        
+    } while ($existing);
+    
+    return $provider_id;
+}
+
+// Ensure clinic role exists
+function skeepy_ensure_clinic_role() {
+    if (!get_role('skeepy_clinic')) {
+        add_role('skeepy_clinic', 'Skeepy Clinic Partner', [
+            'read' => true,
+            'edit_posts' => false,
+            'delete_posts' => false,
+            'publish_posts' => false,
+            'upload_files' => true,
+            'skeepy_submit_claims' => true,
+            'skeepy_view_claims' => true,
+            'skeepy_manage_clinic' => true
+        ]);
+    }
+}
+
+// Create WordPress user for clinic
+function skeepy_create_clinic_user($clinic_data, $provider_id, $username, $password) {
+    // Check if user already exists
+    $existing_user = get_user_by('email', $clinic_data['clinic_email']);
+    if ($existing_user) {
+        return $existing_user->ID;
+    }
+    
+    // Create user with provided username and password
+    $user_id = wp_create_user(
+        $username,
+        $password,
+        $clinic_data['clinic_email']
+    );
+    
+    if (is_wp_error($user_id)) {
+        error_log('Failed to create clinic user: ' . $user_id->get_error_message());
+        return false;
+    }
+    
+    // Update user profile
+    wp_update_user([
+        'ID' => $user_id,
+        'first_name' => $clinic_data['rep_first_name'],
+        'last_name' => $clinic_data['rep_last_name'],
+        'display_name' => $clinic_data['rep_first_name'] . ' ' . $clinic_data['rep_last_name'],
+        'description' => 'Representative for ' . $clinic_data['clinic_name']
+    ]);
+    
+    // Add clinic-specific metadata
+    update_user_meta($user_id, 'skeepy_provider_id', $provider_id);
+    update_user_meta($user_id, 'skeepy_clinic_name', $clinic_data['clinic_name']);
+    update_user_meta($user_id, 'skeepy_job_title', $clinic_data['job_title']);
+    update_user_meta($user_id, 'skeepy_clinic_phone', $clinic_data['clinic_phone']);
+    update_user_meta($user_id, 'skeepy_vcn_number', $clinic_data['vcn_number']);
+    update_user_meta($user_id, 'skeepy_clinic_address', $clinic_data['clinic_address']);
+    update_user_meta($user_id, 'skeepy_application_status', 'pending');
+    
+    // Assign clinic role
+    $user = new WP_User($user_id);
+    $user->set_role('skeepy_clinic');
+    
+    // Send professional email with credentials
+    skeepy_send_clinic_credentials_email($clinic_data, $username, $password, $provider_id);
+    
+    return $user_id;
+}
+
+// Professional email with HTML design matching pet signup
+function skeepy_send_clinic_credentials_email($clinic_data, $username, $password, $provider_id) {
+    $subject = $clinic_data['clinic_name'] . ' Provider Application Received';
+    
+    // Professional HTML formatted email with same design as pet signup
+    $message = '
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Welcome to Skeepy Partnership</title>
+        <style>
+            body {
+                font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+                line-height: 1.6;
+                color: #333;
+                margin: 0;
+                padding: 0;
+                background-color: #f8f9fa;
+            }
+            .email-container {
+                max-width: 600px;
+                margin: 0 auto;
+                background-color: #ffffff;
+                border-radius: 12px;
+                overflow: hidden;
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            }
+            .header {
+                background: linear-gradient(135deg, #145362, #2c7a8c);
+                color: #f9edd7;
+                padding: 30px;
+                text-align: center;
+            }
+            .header h1 {
+                margin: 0;
+                font-size: 28px;
+                font-weight: 700;
+                color: #f9edd7;
+            }
+            .content {
+                padding: 40px 30px;
+            }
+            .greeting {
+                font-size: 18px;
+                margin-bottom: 20px;
+                color: #145362;
+            }
+            .clinic-details {
+                background: linear-gradient(135deg, #f8fcfd, #e8f4f6);
+                border-left: 4px solid #145362;
+                padding: 20px;
+                margin: 25px 0;
+                border-radius: 8px;
+            }
+            .clinic-details h3 {
+                margin: 0 0 15px 0;
+                color: #145362;
+                font-size: 18px;
+            }
+            .details-grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 10px;
+                margin-bottom: 15px;
+            }
+            .detail-item {
+                padding: 8px 0;
+            }
+            .detail-label {
+                font-weight: 600;
+                color: #145362;
+            }
+            .credentials-box {
+                background: #fff5f5;
+                border: 2px solid #f9edd7;
+                border-radius: 8px;
+                padding: 20px;
+                margin: 25px 0;
+            }
+            .credentials-box h3 {
+                margin: 0 0 15px 0;
+                color: #145362;
+                font-size: 18px;
+                font-weight: 700;
+            }
+            .credential-item {
+                margin: 10px 0;
+                padding: 8px 12px;
+                background: #ffffff;
+                border-radius: 5px;
+                border: 1px solid #e0e0e0;
+            }
+            .credential-label {
+                font-weight: 600;
+                color: #666;
+                font-size: 14px;
+            }
+            .credential-value {
+                font-weight: 700;
+                color: #145362;
+                font-size: 16px;
+                word-break: break-all;
+            }
+            .next-steps {
+                background: linear-gradient(135deg, #fff3cd, #ffeaa7);
+                border-left: 4px solid #ffc107;
+                padding: 20px;
+                margin: 25px 0;
+                border-radius: 8px;
+            }
+            .next-steps h3 {
+                margin: 0 0 15px 0;
+                color: #856404;
+                font-size: 18px;
+                font-weight: 700;
+            }
+            .next-steps p {
+                color: #856404;
+                margin: 0 0 10px 0;
+            }
+            .footer {
+                background-color: #f8f9fa;
+                padding: 25px 30px;
+                text-align: center;
+                border-top: 1px solid #e0e0e0;
+            }
+            .footer p {
+                margin: 0;
+                color: #666;
+                font-size: 16px;
+            }
+            .unsubscribe {
+                background-color: #f8f9fa;
+                padding: 20px 30px;
+                text-align: center;
+                border-top: 1px solid #e0e0e0;
+                font-size: 12px;
+                color: #666;
+                line-height: 1.5;
+            }
+            .unsubscribe p {
+                margin: 0 0 10px 0;
+            }
+            .unsubscribe a {
+                color: #145362;
+                text-decoration: none;
+            }
+            .bold { font-weight: 700; }
+            @media (max-width: 600px) {
+                .details-grid {
+                    grid-template-columns: 1fr;
+                }
+                .content {
+                    padding: 30px 20px;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="email-container">
+            <div class="header">
+                <h1>Welcome to Skeepy!</h1>
+            </div>
+            
+            <div class="content">
+                <div class="greeting">
+                    <strong>Dear ' . $clinic_data['rep_first_name'] . ' ' . $clinic_data['rep_last_name'] . ',</strong>
+                </div>
+                
+                <p>Welcome to the Skeepy side of life! Thank you for your interest in becoming a <span class="bold">Skeepy Provider</span>. We\'re excited about the possibility of working together to usher in the next phase of pet care access and coverage in Nigeria.</p>
+                
+                <div class="clinic-details">
+                    <h3>Here are your application details:</h3>
+                    <div class="details-grid">
+                        <div class="detail-item">
+                            <div class="detail-label">Provider ID:</div>
+                            <div class="bold">' . $provider_id . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Clinic Name:</div>
+                            <div class="bold">' . $clinic_data['clinic_name'] . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Representative:</div>
+                            <div class="bold">' . $clinic_data['rep_first_name'] . ' ' . $clinic_data['rep_last_name'] . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Job Title:</div>
+                            <div class="bold">' . $clinic_data['job_title'] . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">VCN Number:</div>
+                            <div class="bold">' . $clinic_data['vcn_number'] . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Phone:</div>
+                            <div class="bold">' . $clinic_data['clinic_phone'] . '</div>
+                        </div>
+                    </div>
+                    <div class="detail-item">
+                        <div class="detail-label">Application Status:</div>
+                        <div class="bold" style="color: #dc3545;">Pending Review</div>
+                    </div>
+                </div>
+                
+                <div class="credentials-box">
+                    <h3>Your Dashboard Access</h3>
+                    <div class="credential-item">
+                        <div class="credential-label">Sign in Link:</div>
+                        <div class="credential-value">https://www.skeepy.co/clinic-signin</div>
+                    </div>
+                    <div class="credential-item">
+                        <div class="credential-label">Username:</div>
+                        <div class="credential-value">' . $username . '</div>
+                    </div>
+                    <div class="credential-item">
+                        <div class="credential-label">Password:</div>
+                        <div class="credential-value">' . $password . '</div>
+                    </div>
+                </div>
+                
+                <p><strong>Keep your Provider ID and login credentials safe</strong> - you\'ll need them for all future communications and system access.</p>
+                
+                <div class="next-steps">
+                    <h3>What\'s Next?</h3>
+                    <p>Our team will review your application within <span class="bold">24-48 hours</span> and approve your application if everything is in order.</p>
+                    <p>Once approved, you\'ll receive full access to:</p>
+                    <ul style="margin: 10px 0 0 0; padding-left: 20px;">
+                        <li>Partner dashboard for claims management</li>
+                        <li>Access to Skeepy\'s growing pet parent community</li>
+                        <li>Marketing support and partnership benefits</li>
+                    </ul>
+                </div>
+                
+                <p>If you have any questions during this, please don\'t hesitate to reach out to our team on: help@skeepy.co</p>
+            </div>
+            
+            <div class="footer">
+                <p>With ❤️ from<br><strong>The Skeepy Partnership Team</strong></p>
+            </div>
+            
+            <div class="unsubscribe">
+                <p>You\'re getting this email because you submitted a clinic partnership application on Skeepy website or app. We respect your privacy and will only send you important updates about your application and partnership status.</p>
+                <p>To unsubscribe from future emails, reply to this email with "UNSUBSCRIBE" in the subject line.</p>
+                <p>©️2025 Skeepy Pet Solutions Limited. | Lagos, Nigeria | help@skeepy.co</p>
+            </div>
+        </div>
+    </body>
+    </html>';
+    
+    // Set headers for HTML email
+    $headers = array('Content-Type: text/html; charset=UTF-8');
+    
+    wp_mail($clinic_data['clinic_email'], $subject, $message, $headers);
+}
+
+// Direct form handler
+function skeepy_clinic_direct_handler() {
+    if (!isset($_POST['submit_clinic_app']) || !isset($_POST['clinic_nonce']) || !wp_verify_nonce($_POST['clinic_nonce'], 'clinic_form_submit')) {
+        return null;
+    }
+    
+    // Ensure table exists and role is created
+    skeepy_ensure_clinic_table();
+    skeepy_ensure_clinic_role();
+    
+    // Validation
+    $errors = [];
+    
+    $required_fields = ['rep_first_name', 'rep_last_name', 'job_title', 'clinic_name', 'clinic_email', 'clinic_phone', 'vcn_number', 'clinic_address', 'provider_id', 'username', 'password', 'confirm_password'];
+    
+    foreach ($required_fields as $field) {
+        if (empty($_POST[$field])) {
+            $errors[] = ucwords(str_replace('_', ' ', $field)) . ' is required';
+        }
+    }
+    
+    // Validate password confirmation
+    if (!empty($_POST['password']) && !empty($_POST['confirm_password'])) {
+        if ($_POST['password'] !== $_POST['confirm_password']) {
+            $errors[] = 'Passwords do not match';
+        }
+    }
+    
+    // Check if username already exists
+    if (!empty($_POST['username']) && username_exists($_POST['username'])) {
+        $errors[] = 'Username already exists. Please choose a different username.';
+    }
+    
+    // Check for profile picture
+    if (!isset($_FILES['profile_picture']) || $_FILES['profile_picture']['error'] !== UPLOAD_ERR_OK) {
+        $errors[] = 'Profile picture is required';
+    }
+    
+    if (!isset($_POST['pets_served']) || empty($_POST['pets_served'])) {
+        $errors[] = 'Please select which pets your clinic serves';
+    }
+    
+    if (!isset($_POST['services']) || empty($_POST['services'])) {
+        $errors[] = 'Please select at least one service';
+    }
+    
+    // Validate service fees - Updated with new service names
+    if (isset($_POST['services']) && !empty($_POST['services'])) {
+        $services_requiring_fees = [
+            'General consultation', 'Rabies vaccination', 'DHLPP vaccination', 'Bordetella',
+            'FVRCP', 'FeLV vaccine', 'Canine flu', 'Feline Chlamydia vaccine', 'Lyme disease',
+            'FIV vaccine', 'Deworming', 'Flea and tick prevention', 
+            'Basic grooming (Eye & ear cleaning, nail clipping)',
+            'Premium grooming (Basic + Shaving)', 'Intestinal/fecal exams', 
+            'Comprehensive physical exams (Oral, Cardiovascular, Abdominal, Pulmonary/lung, Urogenital, Coat/skin, Musculoskeletal, Rectal and Neurologic evaluation)',
+            'Urinalysis', 'Basic blood work (CBC + Blood Chemistry)', 
+            'Comprehensive blood work (Basic + thyroid function, heartwork screening, hormone panels, cancer markers)', 
+            'Advanced Diagnostics (X-rays, ultrasounds)',
+            'Dental cleaning', 'Dental Surgery', 'Spaying', 'Neutering',
+            'Wound Repair', 'Tail Removal', 'Pet boarding (Per day)', 'Pet sitting (Per Hour)',
+            'Travel assistance (health certificate)', 'Microchipping', 'Emergency boarding (Per day)',
+            'Mass Removal', 'Trauma Surgery', 'Gastrointestinal Surgery', 'Ophthalmic Procedure', 'Orthopedic Procedure'
+        ];
+        
+        foreach ($_POST['services'] as $service) {
+            if (in_array($service, $services_requiring_fees)) {
+                if (!isset($_POST['fees'][$service]) || empty($_POST['fees'][$service]) || floatval($_POST['fees'][$service]) <= 0) {
+                    $errors[] = "Please enter a fee for: " . $service;
+                }
+            }
+        }
+    }
+    
+    if (!empty($errors)) {
+        return ['success' => false, 'errors' => $errors];
+    }
+    
+    // Process data
+    $clinic_data = array(
+        'rep_first_name' => sanitize_text_field($_POST['rep_first_name']),
+        'rep_last_name' => sanitize_text_field($_POST['rep_last_name']),
+        'job_title' => sanitize_text_field($_POST['job_title']),
+        'clinic_name' => sanitize_text_field($_POST['clinic_name']),
+        'clinic_email' => sanitize_email($_POST['clinic_email']),
+        'clinic_phone' => sanitize_text_field($_POST['clinic_phone']),
+        'vcn_number' => sanitize_text_field($_POST['vcn_number']),
+        'clinic_address' => sanitize_textarea_field($_POST['clinic_address']),
+        'provider_id' => sanitize_text_field($_POST['provider_id'])
+    );
+    
+    $pets_served = array_map('sanitize_text_field', $_POST['pets_served']);
+    $selected_services = array_map('sanitize_text_field', $_POST['services']);
+    $service_fees = $_POST['fees'] ?? [];
+    
+    // Handle profile picture upload
+    $profile_picture_path = '';
+    if (isset($_FILES['profile_picture']) && $_FILES['profile_picture']['error'] === UPLOAD_ERR_OK) {
+        $upload_dir = wp_upload_dir();
+        $file_name = sanitize_file_name($_FILES['profile_picture']['name']);
+        $file_path = $upload_dir['path'] . '/' . $clinic_data['provider_id'] . '_' . $file_name;
+        
+        if (move_uploaded_file($_FILES['profile_picture']['tmp_name'], $file_path)) {
+            $profile_picture_path = $upload_dir['url'] . '/' . $clinic_data['provider_id'] . '_' . $file_name;
+        }
+    }
+    
+    // Process services with fees
+    $services_data = [];
+    foreach ($selected_services as $service) {
+        $fee = floatval($service_fees[$service] ?? 0);
+        $discount_rate = in_array($service, ['Basic grooming (Eye & ear cleaning, nail clipping)', 'Premium grooming (Basic + Shaving)', 'Pet boarding (Per day)', 'Pet sitting (Per Hour)', 'Emergency boarding (Per day)']) ? 15 : 10;
+        $discounted_fee = $fee > 0 ? round($fee * (1 - $discount_rate / 100), 2) : 0;
+        
+        $services_data[] = [
+            'service' => $service,
+            'original_fee' => $fee,
+            'discount_rate' => $discount_rate,
+            'discounted_fee' => $discounted_fee,
+            'savings' => $fee > 0 ? round($fee - $discounted_fee, 2) : 0
+        ];
+    }
+    
+    // Create WordPress user IMMEDIATELY with provided credentials
+    $username = sanitize_user($_POST['username']);
+    $password = $_POST['password'];
+    $user_id = skeepy_create_clinic_user($clinic_data, $clinic_data['provider_id'], $username, $password);
+    
+    // Insert into database
+    global $wpdb;
+    $clinics_table = $wpdb->prefix . 'skeepy_clinics';
+    
+    $insert_data = array(
+        'provider_id' => $clinic_data['provider_id'],
+        'rep_first_name' => $clinic_data['rep_first_name'],
+        'rep_last_name' => $clinic_data['rep_last_name'],
+        'job_title' => $clinic_data['job_title'],
+        'clinic_name' => $clinic_data['clinic_name'],
+        'clinic_email' => $clinic_data['clinic_email'],
+        'clinic_phone' => $clinic_data['clinic_phone'],
+        'clinic_address' => $clinic_data['clinic_address'],
+        'vcn_number' => $clinic_data['vcn_number'],
+        'profile_picture' => $profile_picture_path,
+        'pets_served' => implode(', ', $pets_served),
+        'services_offered' => wp_json_encode($services_data),
+        'application_status' => 'pending',
+        'application_date' => current_time('mysql'),
+        'wordpress_user_id' => $user_id ?: null
+    );
+    
+    $result = $wpdb->insert($clinics_table, $insert_data);
+    
+    if ($result === false) {
+        $error_msg = $wpdb->last_error ? $wpdb->last_error : 'Database insert failed';
+        error_log('Clinic insert error: ' . $error_msg);
+        return ['success' => false, 'errors' => ['Database error: ' . $error_msg]];
+    }
+    
+    // Link clinic ID to user meta
+    if ($user_id) {
+        update_user_meta($user_id, 'skeepy_clinic_id', $wpdb->insert_id);
+        update_user_meta($user_id, 'skeepy_pets_served', implode(', ', $pets_served));
+        update_user_meta($user_id, 'skeepy_services_offered', wp_json_encode($services_data));
+    }
+    
+    // Success response
+    return [
+        'success' => true,
+        'message' => 'Application submitted successfully!',
+        'provider_id' => $clinic_data['provider_id'],
+        'clinic_name' => $clinic_data['clinic_name'],
+        'user_created' => $user_id ? true : false
+    ];
+}
+
+// Initialize table on load
+add_action('init', 'skeepy_ensure_clinic_table');
+add_action('init', 'skeepy_ensure_clinic_role');
+
+// Shortcode for the form
+function skeepy_clinic_form_shortcode() {
+    skeepy_ensure_clinic_table();
+    
+    // Process form if submitted
+    $result = skeepy_clinic_direct_handler();
+    
+    ob_start();
+    
+    // Show success message
+    if ($result && $result['success']) {
+        ?>
+        <div style="max-width: 800px; margin: 0 auto; padding: 40px; background: linear-gradient(135deg, #d4edda, #c3e6cb); color: #155724; border-radius: 16px; text-align: center; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; box-shadow: 0 8px 25px rgba(16, 185, 129, 0.2);">
+            <div style="font-size: 48px; margin-bottom: 20px;">🎉</div>
+            <h2 style="margin: 0 0 15px 0; color: #145362; font-size: 28px;">Application Submitted Successfully!</h2>
+            <p style="margin: 0 0 15px 0; font-size: 18px; color: #145362;"><strong>Clinic Name: <?php echo esc_html($result['clinic_name']); ?></strong></p>
+            <div style="background: #ffffff; padding: 20px; border-radius: 12px; margin: 20px 0; border: 2px solid #f9edd7;">
+                <p style="margin: 0 0 10px 0; font-size: 16px; color: #145362;"><strong>Your Provider ID:</strong></p>
+                <p style="margin: 0; font-size: 24px; font-weight: 800; color: #145362; letter-spacing: 1px;"><?php echo esc_html($result['provider_id']); ?></p>
+            </div>
+            <p style="margin: 0 0 30px 0; font-size: 16px; line-height: 1.6;">We will review your application within <strong>24-48 hours</strong>.<br>Please copy and keep your Provider ID.</p>
+            <div style="display: flex; gap: 15px; justify-content: center; flex-wrap: wrap;">
+                <button onclick="window.location.reload()" style="background: #10b981; color: white; border: none; padding: 15px 30px; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer;">Submit Another Application</button>
+                <a href="https://www.skeepy.co/clinic-signin" style="background: #3b82f6; color: white; text-decoration: none; padding: 15px 30px; border-radius: 8px; font-size: 16px; font-weight: 600; display: inline-block;">Sign In to Dashboard</a>
+            </div>
+        </div>
+        <?php
+        return ob_get_clean();
+    }
+    
+    // Show errors if any
+    if ($result && !$result['success'] && isset($result['errors'])) {
+        echo '<div style="background: #f8d7da; color: #721c24; padding: 20px; margin-bottom: 20px; border-radius: 12px; border: 1px solid #f5c6cb;">';
+        echo '<h3 style="margin: 0 0 15px 0;">Please correct these errors:</h3>';
+        echo '<ul style="margin: 0; padding-left: 20px;">';
+        foreach ($result['errors'] as $error) {
+            echo '<li>' . esc_html($error) . '</li>';
+        }
+        echo '</ul></div>';
+    }
+    
+    // Generate Provider ID
+    $provider_id = skeepy_generate_provider_id();
+    ?>
+   
+    <div class="skeepy-clinic-form" style="max-width: 900px; margin: 0 auto; padding: 20px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+        <div class="clinic-container" style="background: #ffffff; padding: 40px; border-radius: 20px; box-shadow: 0 15px 50px rgba(20, 83, 98, 0.1);">
+            
+            <div class="provider-id-display" style="background: linear-gradient(135deg, #145362, #2c7a8c); color: #ffffff; padding: 20px; border-radius: 12px; text-align: center; margin-bottom: 30px;">
+                <div style="font-weight: 700; font-size: 16px;">Your Provider ID</div>
+                <div style="font-size: 24px; margin-top: 8px; color: #f9edd7; letter-spacing: 1px; font-weight: 900;"><?php echo $provider_id; ?></div>
+            </div>
+            
+            <form id="skeepy-clinic-form" method="post" enctype="multipart/form-data">
+            
+                <!-- Representative Information -->
+                <div style="margin-bottom: 30px;">
+                    <h3 style="color: #145362; font-size: 20px; font-weight: 800; margin-bottom: 20px; border-bottom: 2px solid #f9edd7; padding-bottom: 10px;">Representative Information</h3>
+                    
+                    <div style="margin-bottom: 20px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px;">First Name *</label>
+                        <input type="text" name="rep_first_name" required style="width: 100%; padding: 18px; border: 2px solid #f9edd7; border-radius: 12px; font-size: 16px; box-sizing: border-box; min-height: 55px;" value="<?php echo isset($_POST['rep_first_name']) ? esc_attr($_POST['rep_first_name']) : ''; ?>">
+                    </div>
+                    <div style="margin-bottom: 20px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px;">Last Name *</label>
+                        <input type="text" name="rep_last_name" required style="width: 100%; padding: 18px; border: 2px solid #f9edd7; border-radius: 12px; font-size: 16px; box-sizing: border-box; min-height: 55px;" value="<?php echo isset($_POST['rep_last_name']) ? esc_attr($_POST['rep_last_name']) : ''; ?>">
+                    </div>
+                    <div>
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px;">Job Title *</label>
+                        <input type="text" name="job_title" required style="width: 100%; padding: 18px; border: 2px solid #f9edd7; border-radius: 12px; font-size: 16px; box-sizing: border-box; min-height: 55px;" value="<?php echo isset($_POST['job_title']) ? esc_attr($_POST['job_title']) : ''; ?>">
+                    </div>
+                </div>
+                
+                <!-- Login Credentials -->
+                <div style="margin-bottom: 30px;">
+                    <h3 style="color: #145362; font-size: 20px; font-weight: 800; margin-bottom: 20px; border-bottom: 2px solid #f9edd7; padding-bottom: 10px;">Login Credentials</h3>
+                    
+                    <div style="margin-bottom: 20px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px;">Username *</label>
+                        <input type="text" name="username" required style="width: 100%; padding: 18px; border: 2px solid #f9edd7; border-radius: 12px; font-size: 16px; box-sizing: border-box; min-height: 55px;" value="<?php echo isset($_POST['username']) ? esc_attr($_POST['username']) : ''; ?>">
+                    </div>
+                    <div style="margin-bottom: 20px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px;">Enter Password *</label>
+                        <div style="position: relative;">
+                            <input type="password" name="password" id="password" required style="width: 100%; padding: 18px 50px 18px 18px; border: 2px solid #f9edd7; border-radius: 12px; font-size: 16px; box-sizing: border-box; min-height: 55px;" value="<?php echo isset($_POST['password']) ? esc_attr($_POST['password']) : ''; ?>">
+                            <button type="button" onclick="togglePassword('password')" style="position: absolute; right: 15px; top: 50%; transform: translateY(-50%); background: none; border: none; color: #145362; cursor: pointer; font-size: 16px;">👁️</button>
+                        </div>
+                    </div>
+                    <div style="margin-bottom: 20px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px;">Confirm Password *</label>
+                        <div style="position: relative;">
+                            <input type="password" name="confirm_password" id="confirm_password" required onblur="validatePasswordMatch()" style="width: 100%; padding: 18px 50px 18px 18px; border: 2px solid #f9edd7; border-radius: 12px; font-size: 16px; box-sizing: border-box; min-height: 55px;" value="<?php echo isset($_POST['confirm_password']) ? esc_attr($_POST['confirm_password']) : ''; ?>">
+                            <button type="button" onclick="togglePassword('confirm_password')" style="position: absolute; right: 15px; top: 50%; transform: translateY(-50%); background: none; border: none; color: #145362; cursor: pointer; font-size: 16px;">👁️</button>
+                        </div>
+                        <div id="password-error" style="color: #dc3545; font-size: 14px; margin-top: 5px; display: none;"></div>
+                    </div>
+                </div>
+                
+                <!-- Clinic Information -->
+                <div style="margin-bottom: 30px;">
+                    <h3 style="color: #145362; font-size: 20px; font-weight: 800; margin-bottom: 20px; border-bottom: 2px solid #f9edd7; padding-bottom: 10px;">Clinic Information</h3>
+                    
+                    <div style="margin-bottom: 20px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px;">Clinic Name *</label>
+                        <input type="text" name="clinic_name" required style="width: 100%; padding: 18px; border: 2px solid #f9edd7; border-radius: 12px; font-size: 16px; box-sizing: border-box; min-height: 55px;" value="<?php echo isset($_POST['clinic_name']) ? esc_attr($_POST['clinic_name']) : ''; ?>">
+                    </div>
+                    <div style="margin-bottom: 20px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px;">Clinic Email *</label>
+                        <input type="email" name="clinic_email" required style="width: 100%; padding: 18px; border: 2px solid #f9edd7; border-radius: 12px; font-size: 16px; box-sizing: border-box; min-height: 55px;" value="<?php echo isset($_POST['clinic_email']) ? esc_attr($_POST['clinic_email']) : ''; ?>">
+                    </div>
+                    <div style="margin-bottom: 20px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px;">Phone Number *</label>
+                        <input type="tel" name="clinic_phone" required style="width: 100%; padding: 18px; border: 2px solid #f9edd7; border-radius: 12px; font-size: 16px; box-sizing: border-box; min-height: 55px;" value="<?php echo isset($_POST['clinic_phone']) ? esc_attr($_POST['clinic_phone']) : ''; ?>">
+                    </div>
+                    <div style="margin-bottom: 20px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px;">VCN Number *</label>
+                        <input type="text" name="vcn_number" required style="width: 100%; padding: 18px; border: 2px solid #f9edd7; border-radius: 12px; font-size: 16px; box-sizing: border-box; min-height: 55px;" value="<?php echo isset($_POST['vcn_number']) ? esc_attr($_POST['vcn_number']) : ''; ?>">
+                    </div>
+                    <div style="margin-bottom: 20px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px;">Clinic Address *</label>
+                        <textarea name="clinic_address" rows="4" required style="width: 100%; padding: 18px; border: 2px solid #f9edd7; border-radius: 12px; font-size: 16px; box-sizing: border-box; min-height: 100px; resize: vertical;"><?php echo isset($_POST['clinic_address']) ? esc_textarea($_POST['clinic_address']) : ''; ?></textarea>
+                    </div>
+                    <div>
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px;">Profile Picture *</label>
+                        <input type="file" name="profile_picture" accept="image/*" required style="width: 100%; padding: 18px; border: 2px solid #f9edd7; border-radius: 12px; font-size: 16px; box-sizing: border-box; background: white; min-height: 55px;">
+                    </div>
+                </div>
+                
+                <!-- Pets Served -->
+                <div style="margin-bottom: 30px;">
+                    <h3 style="color: #145362; font-size: 20px; font-weight: 800; margin-bottom: 20px; border-bottom: 2px solid #f9edd7; padding-bottom: 10px;">Pets Served</h3>
+                    <div style="display: flex; gap: 20px;">
+                        <label style="display: flex; align-items: center; gap: 8px;">
+                            <input type="checkbox" name="pets_served[]" value="dogs" style="width: 18px; height: 18px;" <?php echo (isset($_POST['pets_served']) && in_array('dogs', $_POST['pets_served'])) ? 'checked' : ''; ?>>
+                            Dogs
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 8px;">
+                            <input type="checkbox" name="pets_served[]" value="cats" style="width: 18px; height: 18px;" <?php echo (isset($_POST['pets_served']) && in_array('cats', $_POST['pets_served'])) ? 'checked' : ''; ?>>
+                            Cats
+                        </label>
+                    </div>
+                </div>
+                
+                <!-- Services Offered -->
+                <div style="margin-bottom: 30px;">
+                    <h3 style="color: #145362; font-size: 20px; font-weight: 800; margin-bottom: 20px; border-bottom: 2px solid #f9edd7; padding-bottom: 10px;">Services Offered</h3>
+                    
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 15px;">
+                        <?php
+                        $services = [
+                            'General consultation' => true,
+                            'Rabies vaccination' => true,
+                            'DHLPP vaccination' => true,
+                            'Bordetella' => true,
+                            'FVRCP' => true,
+                            'FeLV vaccine' => true,
+                            'Canine flu' => true,
+                            'Feline Chlamydia vaccine' => true,
+                            'Lyme disease' => true,
+                            'FIV vaccine' => true,
+                            'Deworming' => true,
+                            'Flea and tick prevention' => true,
+                            'Basic grooming (Eye & ear cleaning, nail clipping)' => true,
+                            'Premium grooming (Basic + Shaving)' => true,
+                            'Intestinal/fecal exams' => true,
+                            'Comprehensive physical exams (Oral, Cardiovascular, Abdominal, Pulmonary/lung, Urogenital, Coat/skin, Musculoskeletal, Rectal and Neurologic evaluation)' => true,
+                            'Urinalysis' => true,
+                            'Basic blood work (CBC + Blood Chemistry)' => true,
+                            'Comprehensive blood work (Basic + thyroid function, heartwork screening, hormone panels, cancer markers)' => true,
+                            'Advanced Diagnostics (X-rays, ultrasounds)' => true,
+                            'Dental cleaning' => true,
+                            'Dental Surgery' => true,
+                            'Spaying' => true,
+                            'Neutering' => true,
+                            'Wound Repair' => true,
+                            'Tail Removal' => true,
+                            'Mass Removal' => true,
+                            'Trauma Surgery' => true,
+                            'Gastrointestinal Surgery' => true,
+                            'Ophthalmic Procedure' => true,
+                            'Orthopedic Procedure' => true,
+                            'Other Surgeries' => false,
+                            'Pet boarding (Per day)' => true,
+                            'Pet sitting (Per Hour)' => true,
+                            'Travel assistance (health certificate)' => true,
+                            'Microchipping' => true,
+                            'Emergency boarding (Per day)' => true,
+                            'Routine medication for infections' => false,
+                            'Chronic disease medications' => false,
+                            'Supplements prescribed by a vet' => false
+                        ];
+                        
+                        foreach ($services as $service => $has_fee): 
+                            $is_checked = isset($_POST['services']) && in_array($service, $_POST['services']);
+                            $fee_value = isset($_POST['fees'][$service]) ? esc_attr($_POST['fees'][$service]) : '';
+                            
+                            // Define info notes for specific services
+                            $info_notes = [
+                                'Comprehensive physical exams' => '(Oral, Cardiovascular, Abdominal, Pulmonary/lung, Urogenital, Coat/skin, Musculoskeletal, Rectal and Neurologic evaluation)',
+                                'Basic blood work' => '(CBC + Blood Chemistry)',
+                                'Comprehensive blood work' => '(Basic + thyroid function, heartwork screening, hormone panels, cancer markers)',
+                                'Basic grooming' => '(Eye & ear cleaning, nail clipping)',
+                                'Premium grooming' => '(Basic + Shaving)',
+                                'Advanced Diagnostics' => '(X-rays, ultrasounds)'
+                            ];
+                            
+                            $service_display_name = $service;
+                            $has_info_note = false;
+                            
+                            // Check if this service has an info note
+                            foreach ($info_notes as $service_key => $note) {
+                                if (stripos($service, $service_key) !== false) {
+                                    $service_display_name = $service_key;
+                                    $has_info_note = $note;
+                                    break;
+                                }
+                            }
+                        ?>
+                            <div class="service-item" style="padding: 16px; background: <?php echo $is_checked ? '#f9edd7' : '#ffffff'; ?>; border: 2px solid <?php echo $is_checked ? '#145362' : '#f9edd7'; ?>; border-radius: 12px;">
+                                <label style="display: flex; align-items: center; gap: 12px; margin-bottom: <?php echo ($has_fee || $has_info_note) ? '10px' : '0'; ?>;">
+                                    <input type="checkbox" name="services[]" value="<?php echo htmlspecialchars($service); ?>" data-has-fee="<?php echo $has_fee ? 'true' : 'false'; ?>" style="width: 18px; height: 18px;" onchange="toggleFee(this)" <?php echo $is_checked ? 'checked' : ''; ?>>
+                                    <span style="font-weight: 600; color: #145362;"><?php echo htmlspecialchars($service_display_name); ?></span>
+                                </label>
+                                <?php if ($has_info_note): ?>
+                                    <div style="font-style: italic; color: #666; font-size: 14px; margin-bottom: <?php echo $has_fee ? '10px' : '0'; ?>;">
+                                        <?php echo htmlspecialchars($has_info_note); ?>
+                                    </div>
+                                <?php endif; ?>
+                                <?php if ($has_fee): ?>
+                                    <div style="position: relative;">
+                                        <span style="position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: #145362; font-weight: 700;">₦</span>
+                                        <input type="number" name="fees[<?php echo htmlspecialchars($service); ?>]" placeholder="Enter fee" min="0" step="100" <?php echo $is_checked ? '' : 'disabled'; ?> style="width: 100%; padding: 12px 12px 12px 32px; border: 2px solid <?php echo $is_checked ? '#145362' : '#f9edd7'; ?>; border-radius: 8px; background: <?php echo $is_checked ? '#ffffff' : '#f8f9fa'; ?>; box-sizing: border-box;" value="<?php echo $fee_value; ?>">
+                                    </div>
+                                <?php endif; ?>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+                
+                <input type="hidden" name="provider_id" value="<?php echo $provider_id; ?>">
+                <input type="hidden" name="submit_clinic_app" value="1">
+                <?php wp_nonce_field('clinic_form_submit', 'clinic_nonce'); ?>
+                
+                <button type="submit" style="background: linear-gradient(135deg, #145362, #2c7a8c); color: #ffffff; padding: 18px 40px; border: none; border-radius: 12px; font-size: 18px; font-weight: 700; cursor: pointer; width: 100%;">Submit Application</button>
+                
+            </form>
+        </div>
+    </div>
+    
+    <script>
+    function toggleFee(checkbox) {
+        const serviceItem = checkbox.closest('.service-item');
+        const feeInput = serviceItem.querySelector('input[type="number"]');
+        const hasFee = checkbox.getAttribute('data-has-fee') === 'true';
+        
+        if (checkbox.checked) {
+            serviceItem.style.background = '#f9edd7';
+            serviceItem.style.borderColor = '#145362';
+            
+            if (hasFee && feeInput) {
+                feeInput.disabled = false;
+                feeInput.required = true;
+                feeInput.style.background = '#ffffff';
+                feeInput.style.borderColor = '#145362';
+            }
+        } else {
+            serviceItem.style.background = '#ffffff';
+            serviceItem.style.borderColor = '#f9edd7';
+            
+            if (hasFee && feeInput) {
+                feeInput.disabled = true;
+                feeInput.required = false;
+                feeInput.value = '';
+                feeInput.style.background = '#f8f9fa';
+                feeInput.style.borderColor = '#f9edd7';
+            }
+        }
+    }
+    
+    function togglePassword(fieldId) {
+        const field = document.getElementById(fieldId);
+        const button = field.nextElementSibling;
+        
+        if (field.type === 'password') {
+            field.type = 'text';
+            button.textContent = '🙈';
+        } else {
+            field.type = 'password';
+            button.textContent = '👁️';
+        }
+    }
+    
+    function validatePasswordMatch() {
+        const password = document.getElementById('password').value;
+        const confirmPassword = document.getElementById('confirm_password').value;
+        const errorDiv = document.getElementById('password-error');
+        const confirmField = document.getElementById('confirm_password');
+        
+        if (confirmPassword && password !== confirmPassword) {
+            errorDiv.textContent = 'Passwords do not match';
+            errorDiv.style.display = 'block';
+            confirmField.style.borderColor = '#dc3545';
+            return false;
+        } else {
+            errorDiv.style.display = 'none';
+            confirmField.style.borderColor = '#f9edd7';
+            return true;
+        }
+    }
+    
+    // Form submission validation
+    document.getElementById('skeepy-clinic-form').addEventListener('submit', function(e) {
+        if (!validatePasswordMatch()) {
+            e.preventDefault();
+            document.getElementById('confirm_password').focus();
+            return false;
+        }
+    });
+    </script>
+    
+    <?php
+    return ob_get_clean();
+}
+
+add_shortcode('skeepy_clinic_signup', 'skeepy_clinic_form_shortcode');

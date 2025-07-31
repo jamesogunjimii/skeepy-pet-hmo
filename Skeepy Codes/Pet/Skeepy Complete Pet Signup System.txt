@@ -1,0 +1,1697 @@
+/**
+ * Complete Working Pet Signup System - Multi-Pet Support Version
+ * Updated with email reuse logic, conditional fields, and enhanced validation
+ */
+
+// Ensure pets table exists with proper structure
+function skeepy_ensure_pets_table() {
+    global $wpdb;
+    
+    $pets_table = $wpdb->prefix . 'skeepy_pets';
+    $charset_collate = $wpdb->get_charset_collate();
+    
+    // Check if table exists
+    $table_exists = $wpdb->get_var("SHOW TABLES LIKE '$pets_table'");
+    
+    if ($table_exists != $pets_table) {
+        // Create new table with ALL required columns including marketing_consent
+        $sql = "CREATE TABLE $pets_table (
+            id int(11) NOT NULL AUTO_INCREMENT,
+            hmo_id varchar(20) NOT NULL,
+            pet_name varchar(100) NOT NULL,
+            pet_type varchar(50) NOT NULL,
+            pet_breed varchar(100) NOT NULL,
+            pet_age int(3) NOT NULL,
+            pet_birthday date NOT NULL,
+            pet_gender varchar(10) NOT NULL,
+            pet_color varchar(50) NOT NULL,
+            guardian_first_name varchar(100) NOT NULL,
+            guardian_surname varchar(100) NOT NULL,
+            guardian_email varchar(100) NOT NULL,
+            guardian_phone varchar(20) NOT NULL,
+            guardian_address text NOT NULL,
+            guardian_state varchar(50) NOT NULL,
+            guardian_username varchar(100) NOT NULL,
+            guardian_password varchar(255) NOT NULL,
+            plan_type varchar(20) NOT NULL,
+            plan_duration varchar(20) NOT NULL,
+            monthly_fee decimal(10,2) NOT NULL,
+            coverage_limit decimal(12,2) NOT NULL,
+            profile_picture varchar(255) DEFAULT '',
+            plan_status varchar(20) DEFAULT 'pending',
+            registration_date datetime DEFAULT CURRENT_TIMESTAMP,
+            wordpress_user_id int(11) DEFAULT NULL,
+            marketing_consent tinyint(1) DEFAULT 0,
+            PRIMARY KEY (id),
+            UNIQUE KEY hmo_id (hmo_id)
+        ) $charset_collate;";
+        
+        require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+        dbDelta($sql);
+    } else {
+        // Check and add ALL missing columns
+        $columns = $wpdb->get_results("DESCRIBE $pets_table");
+        $column_names = array_column($columns, 'Field');
+        
+        $required_columns = [
+            'guardian_state' => 'varchar(50) NOT NULL',
+            'pet_birthday' => 'date DEFAULT NULL',
+            'guardian_username' => 'varchar(100) NOT NULL',
+            'guardian_password' => 'varchar(255) NOT NULL',
+            'monthly_fee' => 'decimal(10,2) NOT NULL',
+            'coverage_limit' => 'decimal(12,2) NOT NULL',
+            'profile_picture' => 'varchar(255) DEFAULT ""',
+            'plan_status' => 'varchar(20) DEFAULT "pending"',
+            'registration_date' => 'datetime DEFAULT CURRENT_TIMESTAMP',
+            'wordpress_user_id' => 'int(11) DEFAULT NULL',
+            'marketing_consent' => 'tinyint(1) DEFAULT 0'
+        ];
+        
+        foreach ($required_columns as $column => $definition) {
+            if (!in_array($column, $column_names)) {
+                // Special handling for pet_birthday to allow NULL
+                if ($column === 'pet_birthday') {
+                    $wpdb->query("ALTER TABLE $pets_table ADD COLUMN pet_birthday date DEFAULT NULL");
+                } else {
+                    $wpdb->query("ALTER TABLE $pets_table ADD COLUMN $column $definition");
+                }
+                if ($wpdb->last_error) {
+                    error_log("Error adding column $column: " . $wpdb->last_error);
+                }
+            }
+        }
+        
+        // Remove unique constraint for username since multiple pets can share email/user
+        $wpdb->query("ALTER TABLE $pets_table DROP INDEX IF EXISTS guardian_username");
+        
+        // Check if pet_age column needs to be converted from decimal to int
+        $pet_age_column = $wpdb->get_row("SHOW COLUMNS FROM $pets_table LIKE 'pet_age'");
+        if ($pet_age_column && strpos($pet_age_column->Type, 'decimal') !== false) {
+            $wpdb->query("ALTER TABLE $pets_table MODIFY pet_age int(3) NOT NULL");
+        }
+        
+        // Migrate existing pets with missing or invalid birthday data
+        $pets_with_invalid_birthday = $wpdb->get_results("
+            SELECT id, pet_age, pet_birthday 
+            FROM $pets_table 
+            WHERE pet_birthday IS NULL 
+            OR pet_birthday = '' 
+            OR pet_birthday = '0000-00-00' 
+            OR pet_birthday = '1970-01-01'
+            OR YEAR(pet_birthday) < 1990
+            OR pet_birthday > CURDATE()
+        ");
+
+        foreach ($pets_with_invalid_birthday as $pet) {
+            // Set birthday to NULL for invalid dates
+            $wpdb->update(
+                $pets_table,
+                array('pet_birthday' => NULL),
+                array('id' => $pet->id)
+            );
+        }
+    }
+    
+    if ($wpdb->last_error) {
+        error_log('Pets table error: ' . $wpdb->last_error);
+    }
+    
+    return true;
+}
+
+// Generate HMO ID with alternating letters and numbers
+function skeepy_generate_hmo_id() {
+    global $wpdb;
+    $pets_table = $wpdb->prefix . 'skeepy_pets';
+    
+    do {
+        $letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        $numbers = '0123456789';
+        $hmo_id = 'SKEEPYHMO-';
+        
+        // Generate pattern: L-N-L-N-L-N (Letter-Number alternating, 6 characters total)
+        for ($i = 0; $i < 6; $i++) {
+            if ($i % 2 == 0) {
+                // Even positions (0, 2, 4) - Letters
+                $hmo_id .= $letters[rand(0, strlen($letters) - 1)];
+            } else {
+                // Odd positions (1, 3, 5) - Numbers
+                $hmo_id .= $numbers[rand(0, strlen($numbers) - 1)];
+            }
+        }
+        
+        $existing = $wpdb->get_var($wpdb->prepare(
+            "SELECT hmo_id FROM $pets_table WHERE hmo_id = %s", 
+            $hmo_id
+        ));
+        
+    } while ($existing);
+    
+    return $hmo_id;
+}
+
+// Check if email exists in pets table
+function skeepy_check_email_exists($email) {
+    global $wpdb;
+    $pets_table = $wpdb->prefix . 'skeepy_pets';
+    
+    $existing = $wpdb->get_row($wpdb->prepare(
+        "SELECT guardian_email, guardian_username, guardian_first_name, guardian_surname FROM $pets_table WHERE guardian_email = %s LIMIT 1", 
+        $email
+    ));
+    
+    return $existing;
+}
+
+// Get plan pricing based on type and duration
+function skeepy_get_plan_pricing($plan_type, $plan_duration) {
+    $pricing = [
+        'pawtastic' => [
+            'monthly' => 8000,
+            'quarterly' => 22800,
+            'annual' => 89280
+        ],
+        'furrtastic' => [
+            'monthly' => 16000,
+            'quarterly' => 45600,
+            'annual' => 178560
+        ],
+        'purrfect' => [
+            'monthly' => 32000,
+            'quarterly' => 91200,
+            'annual' => 357120
+        ]
+    ];
+    
+    return $pricing[$plan_type][$plan_duration] ?? 0;
+}
+
+// Get coverage amount based on plan type
+function skeepy_get_coverage_amount($plan_type) {
+    $coverage = [
+        'pawtastic' => 360000,
+        'furrtastic' => 1200000,
+        'purrfect' => 2200000
+    ];
+    
+    return $coverage[$plan_type] ?? 0;
+}
+
+// Ensure pet parent role exists
+function skeepy_ensure_pet_parent_role() {
+    if (!get_role('skeepy_pet_parent')) {
+        add_role('skeepy_pet_parent', 'Skeepy Pet Parent', [
+            'read' => true,
+            'edit_posts' => false,
+            'delete_posts' => false,
+            'publish_posts' => false,
+            'upload_files' => true,
+            'skeepy_submit_claims' => true,
+            'skeepy_view_claims' => true,
+            'skeepy_manage_pet' => true
+        ]);
+    }
+}
+
+// Create or update WordPress user for pet parent
+function skeepy_create_or_update_pet_parent_user($pet_data, $hmo_id, $is_existing_user = false) {
+    if ($is_existing_user) {
+        // Get existing user
+        $existing_user = get_user_by('email', $pet_data['guardian_email']);
+        if ($existing_user) {
+            // Send welcome email for new pet without credentials
+            skeepy_send_new_pet_email($pet_data, $hmo_id);
+            return $existing_user->ID;
+        }
+    }
+    
+    // Check if username already exists
+    if (username_exists($pet_data['guardian_username'])) {
+        return false; // Username taken
+    }
+    
+    // Create user with custom username and password
+    $user_id = wp_create_user(
+        $pet_data['guardian_username'],
+        $pet_data['guardian_password'],
+        $pet_data['guardian_email']
+    );
+    
+    if (is_wp_error($user_id)) {
+        error_log('Failed to create pet parent user: ' . $user_id->get_error_message());
+        return false;
+    }
+    
+    // Update user profile
+    wp_update_user([
+        'ID' => $user_id,
+        'first_name' => $pet_data['guardian_first_name'],
+        'last_name' => $pet_data['guardian_surname'],
+        'display_name' => $pet_data['guardian_first_name'] . ' ' . $pet_data['guardian_surname'],
+        'description' => 'Pet parent for ' . $pet_data['pet_name']
+    ]);
+    
+    // Add pet-specific metadata
+    update_user_meta($user_id, 'skeepy_hmo_id', $hmo_id);
+    update_user_meta($user_id, 'skeepy_pet_name', $pet_data['pet_name']);
+    update_user_meta($user_id, 'skeepy_pet_type', $pet_data['pet_type']);
+    update_user_meta($user_id, 'skeepy_plan_type', $pet_data['plan_type']);
+    update_user_meta($user_id, 'skeepy_plan_duration', $pet_data['plan_duration']);
+    update_user_meta($user_id, 'skeepy_guardian_phone', $pet_data['guardian_phone']);
+    update_user_meta($user_id, 'skeepy_guardian_address', $pet_data['guardian_address']);
+    update_user_meta($user_id, 'skeepy_guardian_state', $pet_data['guardian_state']);
+    update_user_meta($user_id, 'skeepy_plan_status', 'pending');
+    update_user_meta($user_id, 'skeepy_marketing_consent', isset($pet_data['marketing_consent']) ? 1 : 0);
+    
+    // Assign pet parent role
+    $user = new WP_User($user_id);
+    $user->set_role('skeepy_pet_parent');
+    
+    // Send welcome email with credentials for new user
+    skeepy_send_pet_parent_credentials_email($pet_data, $pet_data['guardian_username'], $pet_data['guardian_password'], $hmo_id);
+    
+    return $user_id;
+}
+
+// Send new pet email for existing users (without credentials)
+function skeepy_send_new_pet_email($pet_data, $hmo_id) {
+    $monthly_fee = skeepy_get_plan_pricing($pet_data['plan_type'], $pet_data['plan_duration']);
+    
+    $subject = $pet_data['pet_name'] . ' Is Almost a Skeeper!';
+    
+    // Professional HTML formatted email without paws and with red pending status
+    $message = '
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Welcome to Skeepy</title>
+        <style>
+            body {
+                font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+                line-height: 1.6;
+                color: #333;
+                margin: 0;
+                padding: 0;
+                background-color: #f8f9fa;
+            }
+            .email-container {
+                max-width: 600px;
+                margin: 0 auto;
+                background-color: #ffffff;
+                border-radius: 12px;
+                overflow: hidden;
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            }
+            .header {
+                background: linear-gradient(135deg, #145362, #2c7a8c);
+                color: #f9edd7;
+                padding: 30px;
+                text-align: center;
+            }
+            .header h1 {
+                margin: 0;
+                font-size: 28px;
+                font-weight: 700;
+                color: #f9edd7;
+            }
+            .content {
+                padding: 40px 30px;
+            }
+            .greeting {
+                font-size: 18px;
+                margin-bottom: 20px;
+                color: #145362;
+            }
+            .pet-details {
+                background: linear-gradient(135deg, #f8fcfd, #e8f4f6);
+                border-left: 4px solid #145362;
+                padding: 20px;
+                margin: 25px 0;
+                border-radius: 8px;
+            }
+            .pet-details h3 {
+                margin: 0 0 15px 0;
+                color: #145362;
+                font-size: 18px;
+            }
+            .details-grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 10px;
+                margin-bottom: 15px;
+            }
+            .detail-item {
+                padding: 8px 0;
+            }
+            .detail-label {
+                font-weight: 600;
+                color: #145362;
+            }
+            .next-steps {
+                background: linear-gradient(135deg, #e8f5e8, #d1f2d1);
+                border-left: 4px solid #28a745;
+                padding: 20px;
+                margin: 25px 0;
+                border-radius: 8px;
+            }
+            .next-steps h3 {
+                margin: 0 0 15px 0;
+                color: #28a745;
+                font-size: 18px;
+                font-weight: 700;
+            }
+            .payment-button {
+                background-color: #dc3545;
+                color: #ffffff !important;
+                padding: 15px 30px;
+                text-decoration: none;
+                border-radius: 8px;
+                display: inline-block;
+                font-weight: 700;
+                font-size: 16px;
+                margin: 20px 0;
+                text-align: center;
+                border: none;
+                cursor: pointer;
+                transition: background-color 0.3s ease;
+            }
+            .payment-button:hover {
+                background-color: #c82333;
+            }
+            .footer {
+                background-color: #f8f9fa;
+                padding: 25px 30px;
+                text-align: center;
+                border-top: 1px solid #e0e0e0;
+            }
+            .footer p {
+                margin: 0;
+                color: #666;
+                font-size: 16px;
+            }
+            .unsubscribe {
+                background-color: #f8f9fa;
+                padding: 20px 30px;
+                text-align: center;
+                border-top: 1px solid #e0e0e0;
+                font-size: 12px;
+                color: #666;
+                line-height: 1.5;
+            }
+            .unsubscribe p {
+                margin: 0 0 10px 0;
+            }
+            .unsubscribe a {
+                color: #145362;
+                text-decoration: none;
+            }
+            .bold { font-weight: 700; }
+            @media (max-width: 600px) {
+                .details-grid {
+                    grid-template-columns: 1fr;
+                }
+                .content {
+                    padding: 30px 20px;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="email-container">
+            <div class="header">
+                <h1>Welcome to Skeepy!</h1>
+            </div>
+            
+            <div class="content">
+                <div class="greeting">
+                    <strong>Dear ' . $pet_data['guardian_first_name'] . ' ' . $pet_data['guardian_surname'] . ',</strong>
+                </div>
+                
+                <p>Welcome to the Skeepy side of life! <span class="bold">' . $pet_data['pet_name'] . '</span> is about to be protected under our <span class="bold">' . ucfirst($pet_data['plan_type']) . '</span> plan. You\'re one step closer to giving your pet access to structured, reliable health coverage.</p>
+                
+                <div class="pet-details">
+                    <h3>Here are <span class="bold">' . $pet_data['pet_name'] . '</span>\'s details:</h3>
+                    <div class="details-grid">
+                        <div class="detail-item">
+                            <div class="detail-label">HMO ID:</div>
+                            <div class="bold">' . $hmo_id . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Pet Name:</div>
+                            <div class="bold">' . $pet_data['pet_name'] . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Pet Type:</div>
+                            <div class="bold">' . $pet_data['pet_type'] . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Breed:</div>
+                            <div class="bold">' . $pet_data['pet_breed'] . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Plan:</div>
+                            <div class="bold">' . ucfirst($pet_data['plan_type']) . ' (' . $pet_data['plan_duration'] . ')</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Plan Fee:</div>
+                            <div class="bold">₦' . number_format($monthly_fee) . '</div>
+                        </div>
+                    </div>
+                    <div class="detail-item">
+                        <div class="detail-label">Plan Status:</div>
+                        <div class="bold" style="color: #dc3545;">Pending</div>
+                    </div>
+                </div>
+                
+                <p><strong>Keep your HMO ID safe</strong> - you\'ll need it for all claims and vet visits.</p>
+                
+                <div class="next-steps">
+                    <h3>What\'s Next?</h3>
+                    <p>To activate <span class="bold">' . $pet_data['pet_name'] . '</span>\'s HMO plan and unlock benefits, complete your payment now. <span class="bold">' . $pet_data['pet_name'] . '</span>\'s coverage will only begin after payment confirmation.</p>
+                    
+                    <div style="text-align: center; margin-top: 20px;">
+                        <a href="#" class="payment-button">Make Payment</a>
+                    </div>
+                    
+                    <p style="margin-top: 20px;">You can access your existing dashboard with your current login credentials to manage all your pets.</p>
+                </div>
+            </div>
+            
+            <div class="footer">
+                <p>With ❤️ from<br><strong>The Skeepy Team</strong></p>
+            </div>
+            
+            <div class="unsubscribe">
+                <p>You\'re getting this email because you signed up on Skeepy website or app. We respect your privacy and will only send you important updates about your pet\'s coverage.</p>
+                <p>To unsubscribe from future emails, reply to this email with "UNSUBSCRIBE" in the subject line.</p>
+                <p>©️2025 Skeepy Pet Solutions Limited. | Lagos, Nigeria | help@skeepy.co</p>
+            </div>
+        </div>
+    </body>
+    </html>';
+    
+    // Set headers for HTML email
+    $headers = array('Content-Type: text/html; charset=UTF-8');
+    
+    wp_mail($pet_data['guardian_email'], $subject, $message, $headers);
+}
+
+// Send enhanced credentials email for new users (without paws, red pending)
+function skeepy_send_pet_parent_credentials_email($pet_data, $username, $password, $hmo_id) {
+    $monthly_fee = skeepy_get_plan_pricing($pet_data['plan_type'], $pet_data['plan_duration']);
+    
+    $subject = $pet_data['pet_name'] . ' Is Almost a Skeeper!';
+    
+    // Professional HTML formatted email without paws and with red pending status
+    $message = '
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Welcome to Skeepy</title>
+        <style>
+            body {
+                font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+                line-height: 1.6;
+                color: #333;
+                margin: 0;
+                padding: 0;
+                background-color: #f8f9fa;
+            }
+            .email-container {
+                max-width: 600px;
+                margin: 0 auto;
+                background-color: #ffffff;
+                border-radius: 12px;
+                overflow: hidden;
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            }
+            .header {
+                background: linear-gradient(135deg, #145362, #2c7a8c);
+                color: #f9edd7;
+                padding: 30px;
+                text-align: center;
+            }
+            .header h1 {
+                margin: 0;
+                font-size: 28px;
+                font-weight: 700;
+                color: #f9edd7;
+            }
+            .content {
+                padding: 40px 30px;
+            }
+            .greeting {
+                font-size: 18px;
+                margin-bottom: 20px;
+                color: #145362;
+            }
+            .pet-details {
+                background: linear-gradient(135deg, #f8fcfd, #e8f4f6);
+                border-left: 4px solid #145362;
+                padding: 20px;
+                margin: 25px 0;
+                border-radius: 8px;
+            }
+            .pet-details h3 {
+                margin: 0 0 15px 0;
+                color: #145362;
+                font-size: 18px;
+            }
+            .details-grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 10px;
+                margin-bottom: 15px;
+            }
+            .detail-item {
+                padding: 8px 0;
+            }
+            .detail-label {
+                font-weight: 600;
+                color: #145362;
+            }
+            .credentials-box {
+                background: #fff5f5;
+                border: 2px solid #f9edd7;
+                border-radius: 8px;
+                padding: 20px;
+                margin: 25px 0;
+            }
+            .credentials-box h3 {
+                margin: 0 0 15px 0;
+                color: #145362;
+                font-size: 18px;
+                font-weight: 700;
+            }
+            .credential-item {
+                margin: 10px 0;
+                padding: 8px 12px;
+                background: #ffffff;
+                border-radius: 5px;
+                border: 1px solid #e0e0e0;
+            }
+            .credential-label {
+                font-weight: 600;
+                color: #666;
+                font-size: 14px;
+            }
+            .credential-value {
+                font-weight: 700;
+                color: #145362;
+                font-size: 16px;
+                word-break: break-all;
+            }
+            .next-steps {
+                background: linear-gradient(135deg, #e8f5e8, #d1f2d1);
+                border-left: 4px solid #28a745;
+                padding: 20px;
+                margin: 25px 0;
+                border-radius: 8px;
+            }
+            .next-steps h3 {
+                margin: 0 0 15px 0;
+                color: #28a745;
+                font-size: 18px;
+                font-weight: 700;
+            }
+            .payment-button {
+                background-color: #dc3545;
+                color: #ffffff !important;
+                padding: 15px 30px;
+                text-decoration: none;
+                border-radius: 8px;
+                display: inline-block;
+                font-weight: 700;
+                font-size: 16px;
+                margin: 20px 0;
+                text-align: center;
+                border: none;
+                cursor: pointer;
+                transition: background-color 0.3s ease;
+            }
+            .payment-button:hover {
+                background-color: #c82333;
+            }
+            .footer {
+                background-color: #f8f9fa;
+                padding: 25px 30px;
+                text-align: center;
+                border-top: 1px solid #e0e0e0;
+            }
+            .footer p {
+                margin: 0;
+                color: #666;
+                font-size: 16px;
+            }
+            .unsubscribe {
+                background-color: #f8f9fa;
+                padding: 20px 30px;
+                text-align: center;
+                border-top: 1px solid #e0e0e0;
+                font-size: 12px;
+                color: #666;
+                line-height: 1.5;
+            }
+            .unsubscribe p {
+                margin: 0 0 10px 0;
+            }
+            .unsubscribe a {
+                color: #145362;
+                text-decoration: none;
+            }
+            .bold { font-weight: 700; }
+            @media (max-width: 600px) {
+                .details-grid {
+                    grid-template-columns: 1fr;
+                }
+                .content {
+                    padding: 30px 20px;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="email-container">
+            <div class="header">
+                <h1>Welcome to Skeepy!</h1>
+            </div>
+            
+            <div class="content">
+                <div class="greeting">
+                    <strong>Dear ' . $pet_data['guardian_first_name'] . ' ' . $pet_data['guardian_surname'] . ',</strong>
+                </div>
+                
+                <p>Welcome to the Skeepy side of life! <span class="bold">' . $pet_data['pet_name'] . '</span> is about to be protected under our <span class="bold">' . ucfirst($pet_data['plan_type']) . '</span> plan. You\'re one step closer to giving your pet access to structured, reliable health coverage.</p>
+                
+                <div class="pet-details">
+                    <h3>Here are <span class="bold">' . $pet_data['pet_name'] . '</span>\'s details:</h3>
+                    <div class="details-grid">
+                        <div class="detail-item">
+                            <div class="detail-label">HMO ID:</div>
+                            <div class="bold">' . $hmo_id . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Pet Name:</div>
+                            <div class="bold">' . $pet_data['pet_name'] . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Pet Type:</div>
+                            <div class="bold">' . $pet_data['pet_type'] . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Breed:</div>
+                            <div class="bold">' . $pet_data['pet_breed'] . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Plan:</div>
+                            <div class="bold">' . ucfirst($pet_data['plan_type']) . ' (' . $pet_data['plan_duration'] . ')</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Plan Fee:</div>
+                            <div class="bold">₦' . number_format($monthly_fee) . '</div>
+                        </div>
+                    </div>
+                    <div class="detail-item">
+                        <div class="detail-label">Plan Status:</div>
+                        <div class="bold" style="color: #dc3545;">Pending</div>
+                    </div>
+                </div>
+                
+                <p><strong>Keep your HMO ID safe</strong> - you\'ll need it for all claims and vet visits.</p>
+                
+                <div class="credentials-box">
+                    <h3>Here\'s your login credentials:</h3>
+                    <div class="credential-item">
+                        <div class="credential-label">Sign in Link:</div>
+                        <div class="credential-value">https://www.skeepy.co/pet-login</div>
+                    </div>
+                    <div class="credential-item">
+                        <div class="credential-label">Username:</div>
+                        <div class="credential-value">' . $username . '</div>
+                    </div>
+                    <div class="credential-item">
+                        <div class="credential-label">Password:</div>
+                        <div class="credential-value">' . $password . '</div>
+                    </div>
+                </div>
+                
+                <div class="next-steps">
+                    <h3>What\'s Next?</h3>
+                    <p>To activate <span class="bold">' . $pet_data['pet_name'] . '</span>\'s HMO plan and unlock benefits, complete your payment now. <span class="bold">' . $pet_data['pet_name'] . '</span>\'s coverage will only begin after payment confirmation.</p>
+                    
+                    <div style="text-align: center; margin-top: 20px;">
+                        <a href="#" class="payment-button">Make Payment</a>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="footer">
+                <p>With ❤️ from<br><strong>The Skeepy Team</strong></p>
+            </div>
+            
+            <div class="unsubscribe">
+                <p>You\'re getting this email because you signed up on Skeepy website or app. We respect your privacy and will only send you important updates about your pet\'s coverage.</p>
+                <p>To unsubscribe from future emails, reply to this email with "UNSUBSCRIBE" in the subject line.</p>
+                <p>©️2025 Skeepy Pet Solutions Limited. | Lagos, Nigeria | help@skeepy.co</p>
+            </div>
+        </div>
+    </body>
+    </html>';
+    
+    // Set headers for HTML email
+    $headers = array('Content-Type: text/html; charset=UTF-8');
+    
+    wp_mail($pet_data['guardian_email'], $subject, $message, $headers);
+}
+
+// Direct form handler with multi-pet support and conditional logic
+function skeepy_pet_direct_handler() {
+    if (!isset($_POST['submit_pet_signup']) || !isset($_POST['pet_nonce']) || !wp_verify_nonce($_POST['pet_nonce'], 'pet_form_submit')) {
+        return null;
+    }
+    
+    // Ensure table exists and role is created
+    skeepy_ensure_pets_table();
+    skeepy_ensure_pet_parent_role();
+    
+    // Check if user selected "No" for existing email
+    if (isset($_POST['existing_email_action']) && $_POST['existing_email_action'] === 'no') {
+        return ['success' => false, 'redirect_to_login' => true];
+    }
+    
+    // Check if this is an existing user adding new pet
+    $is_existing_user = isset($_POST['existing_email_action']) && $_POST['existing_email_action'] === 'yes';
+    
+    // Validation
+    $errors = [];
+    
+    // Required fields (adjust based on existing user status)
+    $required_fields = ['hmo_id', 'pet_name', 'pet_type', 'pet_breed', 'pet_age', 'pet_birthday', 'pet_gender', 'pet_color', 
+                       'guardian_first_name', 'guardian_surname', 'guardian_email', 'guardian_phone', 
+                       'guardian_address', 'guardian_state', 'plan_type', 'plan_duration'];
+    
+    // Add username/password requirements for new users only
+    if (!$is_existing_user) {
+        $required_fields[] = 'guardian_username';
+        $required_fields[] = 'guardian_password';
+        $required_fields[] = 'confirm_password';
+    }
+    
+    foreach ($required_fields as $field) {
+        if (empty($_POST[$field])) {
+            $errors[$field] = ucwords(str_replace('_', ' ', $field)) . ' is required';
+        }
+    }
+    
+    // Password confirmation validation for new users only
+    if (!$is_existing_user && !empty($_POST['guardian_password']) && !empty($_POST['confirm_password'])) {
+        if ($_POST['guardian_password'] !== $_POST['confirm_password']) {
+            $errors['confirm_password'] = 'Passwords do not match';
+        }
+    }
+    
+    // Check for profile picture - required
+    if (!isset($_FILES['profile_picture']) || $_FILES['profile_picture']['error'] !== UPLOAD_ERR_OK) {
+        $errors['profile_picture'] = 'Pet picture is required';
+    }
+    
+    // Username validation for new users only
+    if (!$is_existing_user && !empty($_POST['guardian_username'])) {
+        if (username_exists($_POST['guardian_username'])) {
+            $errors['guardian_username'] = 'Username already exists. Please choose another.';
+        }
+        if (strlen($_POST['guardian_username']) < 3) {
+            $errors['guardian_username'] = 'Username must be at least 3 characters long';
+        }
+    }
+    
+    // Email validation for new users only
+    if (!$is_existing_user && !empty($_POST['guardian_email'])) {
+        if (email_exists($_POST['guardian_email'])) {
+            $errors['guardian_email'] = 'Email address already registered';
+        }
+    }
+    
+    // Validate HMO ID format (alternating letters and numbers)
+    if (!empty($_POST['hmo_id']) && !preg_match('/^SKEEPYHMO-[A-Z][0-9][A-Z][0-9][A-Z][0-9]$/', $_POST['hmo_id'])) {
+        $errors['hmo_id'] = 'Invalid HMO ID format';
+    }
+    
+    // Validate plan type
+    $valid_plans = ['pawtastic', 'furrtastic', 'purrfect'];
+    if (!empty($_POST['plan_type']) && !in_array($_POST['plan_type'], $valid_plans)) {
+        $errors['plan_type'] = 'Invalid plan type selected';
+    }
+    
+    // Validate plan duration
+    $valid_durations = ['monthly', 'quarterly', 'annual'];
+    if (!empty($_POST['plan_duration']) && !in_array($_POST['plan_duration'], $valid_durations)) {
+        $errors['plan_duration'] = 'Invalid plan duration selected';
+    }
+    
+    if (!empty($errors)) {
+        return ['success' => false, 'errors' => $errors];
+    }
+    
+    // Process data
+    $pet_age = intval($_POST['pet_age']);
+    $pet_birthday = sanitize_text_field($_POST['pet_birthday']);
+
+    // Validate birthday format if provided
+    if (!empty($pet_birthday)) {
+        try {
+            $birthday_date = new DateTime($pet_birthday);
+            $today = new DateTime();
+            
+            // Ensure birthday is not in the future
+            if ($birthday_date > $today) {
+                return ['success' => false, 'errors' => ['pet_birthday' => 'Pet birthday cannot be in the future']];
+            }
+            
+            // Calculate age from birthday for consistency
+            $age_from_birthday = $birthday_date->diff($today)->y;
+            
+            // If user-entered age differs significantly from calculated age, show warning
+            if (abs($pet_age - $age_from_birthday) > 1) {
+                // Allow 1 year difference due to birthday timing
+                // You could add a warning here or adjust the age
+                $pet_age = $age_from_birthday; // Use calculated age for accuracy
+            }
+            
+            // Store birthday in Y-m-d format for database
+            $pet_birthday = $birthday_date->format('Y-m-d');
+        } catch (Exception $e) {
+            return ['success' => false, 'errors' => ['pet_birthday' => 'Invalid date format']];
+        }
+    } else {
+        // If no birthday provided but age is given, store empty birthday
+        $pet_birthday = '';
+    }
+    
+    $pet_data = array(
+        'hmo_id' => sanitize_text_field($_POST['hmo_id']),
+        'pet_name' => sanitize_text_field($_POST['pet_name']),
+        'pet_type' => sanitize_text_field($_POST['pet_type']),
+        'pet_breed' => sanitize_text_field($_POST['pet_breed']),
+        'pet_age' => $pet_age,
+        'pet_birthday' => $pet_birthday,
+        'pet_gender' => sanitize_text_field($_POST['pet_gender']),
+        'pet_color' => sanitize_text_field($_POST['pet_color']),
+        'guardian_first_name' => sanitize_text_field($_POST['guardian_first_name']),
+        'guardian_surname' => sanitize_text_field($_POST['guardian_surname']),
+        'guardian_email' => sanitize_email($_POST['guardian_email']),
+        'guardian_phone' => sanitize_text_field($_POST['guardian_phone']),
+        'guardian_address' => sanitize_textarea_field($_POST['guardian_address']),
+        'guardian_state' => sanitize_text_field($_POST['guardian_state']),
+        'plan_type' => sanitize_text_field($_POST['plan_type']),
+        'plan_duration' => sanitize_text_field($_POST['plan_duration']),
+        'marketing_consent' => isset($_POST['marketing_consent']) ? 1 : 0
+    );
+    
+    // Add username/password for new users
+    if (!$is_existing_user) {
+        $pet_data['guardian_username'] = sanitize_user($_POST['guardian_username']);
+        $pet_data['guardian_password'] = $_POST['guardian_password']; // Don't sanitize password
+    } else {
+        // For existing users, get their existing username
+        $existing_data = skeepy_check_email_exists($pet_data['guardian_email']);
+        $pet_data['guardian_username'] = $existing_data->guardian_username;
+        $pet_data['guardian_password'] = ''; // Will be ignored for existing users
+    }
+    
+    // Check if HMO ID already exists
+    global $wpdb;
+    $pets_table = $wpdb->prefix . 'skeepy_pets';
+    $existing = $wpdb->get_var($wpdb->prepare("SELECT hmo_id FROM $pets_table WHERE hmo_id = %s", $pet_data['hmo_id']));
+    
+    if ($existing) {
+        return ['success' => false, 'errors' => ['hmo_id' => 'HMO ID already exists. Please refresh the page to get a new ID.']];
+    }
+    
+    // Get pricing and coverage information
+    $monthly_fee = skeepy_get_plan_pricing($pet_data['plan_type'], $pet_data['plan_duration']);
+    $coverage_limit = skeepy_get_coverage_amount($pet_data['plan_type']);
+    
+    if ($monthly_fee <= 0) {
+        return ['success' => false, 'errors' => ['plan_type' => 'Error calculating plan pricing']];
+    }
+    
+    // Handle profile picture upload
+    $profile_picture_path = '';
+    if (isset($_FILES['profile_picture']) && $_FILES['profile_picture']['error'] === UPLOAD_ERR_OK) {
+        if (!function_exists('wp_handle_upload')) {
+            require_once(ABSPATH . 'wp-admin/includes/file.php');
+        }
+        
+        $upload = wp_handle_upload($_FILES['profile_picture'], array('test_form' => false));
+        if (!isset($upload['error'])) {
+            $profile_picture_path = $upload['url'];
+        }
+    }
+    
+    // Create or update WordPress user
+    $user_id = skeepy_create_or_update_pet_parent_user($pet_data, $pet_data['hmo_id'], $is_existing_user);
+    
+    if (!$user_id) {
+        return ['success' => false, 'errors' => ['guardian_username' => 'Failed to create user account. Username may already exist.']];
+    }
+    
+    // Insert into database
+    $insert_data = array_merge($pet_data, array(
+        'profile_picture' => $profile_picture_path,
+        'coverage_limit' => $coverage_limit,
+        'monthly_fee' => $monthly_fee,
+        'plan_status' => 'pending',
+        'registration_date' => current_time('mysql'),
+        'wordpress_user_id' => $user_id
+    ));
+    
+    // Hash password for new users
+    if (!$is_existing_user) {
+        $insert_data['guardian_password'] = wp_hash_password($pet_data['guardian_password']);
+    } else {
+        // For existing users, copy the existing password hash
+        $existing_user_data = $wpdb->get_row($wpdb->prepare(
+            "SELECT guardian_password FROM $pets_table WHERE guardian_email = %s LIMIT 1", 
+            $pet_data['guardian_email']
+        ));
+        $insert_data['guardian_password'] = $existing_user_data->guardian_password;
+    }
+    
+    $result = $wpdb->insert($pets_table, $insert_data);
+    
+    if ($result === false) {
+        $error_msg = $wpdb->last_error ? $wpdb->last_error : 'Database insert failed';
+        error_log('Pet insert error: ' . $error_msg);
+        return ['success' => false, 'errors' => ['general' => 'Database error: ' . $error_msg]];
+    }
+    
+    // Link pet ID to user meta
+    if ($user_id) {
+        update_user_meta($user_id, 'skeepy_pet_id', $wpdb->insert_id);
+        update_user_meta($user_id, 'skeepy_coverage_limit', $coverage_limit);
+        update_user_meta($user_id, 'skeepy_monthly_fee', $monthly_fee);
+    }
+    
+    // Success response
+    return [
+        'success' => true,
+        'message' => 'Pet registered successfully!',
+        'hmo_id' => $pet_data['hmo_id'],
+        'pet_name' => $pet_data['pet_name'],
+        'plan_type' => $pet_data['plan_type'],
+        'user_created' => true,
+        'is_existing_user' => $is_existing_user
+    ];
+}
+
+// Initialize on load
+add_action('init', 'skeepy_ensure_pets_table');
+add_action('init', 'skeepy_ensure_pet_parent_role');
+
+// Shortcode for the form with multi-pet support
+function skeepy_pet_signup_form_shortcode() {
+    skeepy_ensure_pets_table();
+    
+    // Process form if submitted
+    $result = skeepy_pet_direct_handler();
+    
+    ob_start();
+    
+    // Show redirect to login if user selected "No"
+    if ($result && isset($result['redirect_to_login']) && $result['redirect_to_login']) {
+        ?>
+        <div style="max-width: 600px; margin: 0 auto; padding: 40px; background: linear-gradient(135deg, #e8f4f6, #d1ebf0); color: #145362; border-radius: 16px; text-align: center; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; box-shadow: 0 8px 25px rgba(20, 83, 98, 0.2);">
+            <h2 style="margin: 0 0 20px 0; color: #145362; font-size: 24px;">Welcome Back!</h2>
+            <p style="margin: 0 0 30px 0; font-size: 16px; line-height: 1.6;">Please sign in to your existing account to manage your pets and access your dashboard.</p>
+            <div style="text-align: center;">
+                <a href="https://www.skeepy.co/pet-login" style="background: #145362; color: white; text-decoration: none; padding: 15px 30px; border-radius: 8px; font-size: 16px; font-weight: 600; display: inline-block;">Sign in to Dashboard</a>
+            </div>
+        </div>
+        <?php
+        return ob_get_clean();
+    }
+    
+    // Show enhanced success message
+    if ($result && $result['success']) {
+        $message_type = $result['is_existing_user'] ? 'New Pet Added!' : 'Payment Pending';
+        ?>
+        <div style="max-width: 800px; margin: 0 auto; padding: 40px; background: linear-gradient(135deg, #d4edda, #c3e6cb); color: #155724; border-radius: 16px; text-align: center; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; box-shadow: 0 8px 25px rgba(16, 185, 129, 0.2);">
+            <div style="font-size: 48px; margin-bottom: 20px;">🐾</div>
+            <h2 style="margin: 0 0 15px 0; color: #145362; font-size: 28px;"><?php echo $message_type; ?></h2>
+            <p style="margin: 0 0 15px 0; font-size: 18px; color: #145362;"><strong><?php echo esc_html($result['pet_name']); ?></strong> is almost covered by Skeepy under the <strong><?php echo ucfirst($result['plan_type']); ?></strong> Plan</p>
+            <div style="background: #ffffff; padding: 20px; border-radius: 12px; margin: 20px 0; border: 2px solid #f9edd7;">
+                <p style="margin: 0 0 10px 0; font-size: 16px; color: #145362;"><strong><?php echo esc_html($result['pet_name']); ?>'s HMO ID:</strong></p>
+                <p style="margin: 0; font-size: 24px; font-weight: 800; color: #145362; letter-spacing: 1px;"><?php echo esc_html($result['hmo_id']); ?></p>
+            </div>
+            <p style="margin: 0 0 30px 0; font-size: 16px; line-height: 1.6;">Click on "Make Payment" to complete your signup and activate your plan.</p>
+            <div style="text-align: center;">
+                <a href="#" style="background: #dc3545; color: white; text-decoration: none; padding: 15px 30px; border-radius: 8px; font-size: 16px; font-weight: 600; display: inline-block;">Make Payment</a>
+            </div>
+        </div>
+        <?php
+        return ob_get_clean();
+    }
+    
+    // Generate new HMO ID on every page load/refresh
+    $hmo_id = skeepy_generate_hmo_id();
+    $errors = $result['errors'] ?? [];
+    ?>
+    <div class="skeepy-pet-signup" style="max-width: 900px; margin: 0 auto; padding: 40px 20px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+        <div class="signup-container" style="background: #ffffff; padding: 40px; border-radius: 16px; box-shadow: 0 8px 32px rgba(20, 83, 98, 0.08); border: 1px solid #f9edd7;">
+            
+            <form method="post" enctype="multipart/form-data" id="pet-signup-form">
+                <?php wp_nonce_field('pet_form_submit', 'pet_nonce'); ?>
+                <input type="hidden" name="hmo_id" value="<?php echo $hmo_id; ?>">
+                
+                <!-- HMO ID Display -->
+                <div style="background: linear-gradient(135deg, #145362, #2c7a8c); color: #ffffff; padding: 20px; border-radius: 12px; text-align: center; margin-bottom: 40px;">
+                    <div style="font-size: 14px; font-weight: 600; margin-bottom: 8px; opacity: 0.9;">Your HMO ID</div>
+                    <div style="font-size: 24px; font-weight: 900; letter-spacing: 2px; color: #f9edd7;" id="generated-hmo-id"><?php echo $hmo_id; ?></div>
+                </div>
+                
+                <!-- Guardian Information -->
+                <div class="form-section" style="margin-bottom: 40px;">
+                    <h3 style="color: #145362; font-size: 20px; font-weight: 800; margin: 0 0 24px 0; display: flex; align-items: center;">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" style="margin-right: 12px;">
+                            <path d="M20 4H4C2.9 4 2 4.9 2 6V18C2 19.1 2.9 20 4 20H20C21.1 20 22 19.1 22 18V6C22 4.9 21.1 4 20 4ZM20 8L12 13L4 8V6L12 11L20 6V8Z" fill="#145362"/>
+                        </svg>
+                        Guardian Information
+                    </h3>
+                    
+                    <div style="margin-bottom: 24px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px; font-size: 15px;">First Name *</label>
+                        <input type="text" name="guardian_first_name" required value="<?php echo esc_attr($_POST['guardian_first_name'] ?? ''); ?>" 
+                               style="width: 100%; padding: 16px 20px; border: 2px solid <?php echo isset($errors['guardian_first_name']) ? '#dc3545' : '#f9edd7'; ?>; border-radius: 8px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box;">
+                        <?php if (isset($errors['guardian_first_name'])): ?>
+                            <div style="color: #dc3545; font-size: 14px; margin-top: 5px; font-weight: 600;"><?php echo esc_html($errors['guardian_first_name']); ?></div>
+                        <?php endif; ?>
+                    </div>
+                    
+                    <div style="margin-bottom: 24px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px; font-size: 15px;">Last Name *</label>
+                        <input type="text" name="guardian_surname" required value="<?php echo esc_attr($_POST['guardian_surname'] ?? ''); ?>" 
+                               style="width: 100%; padding: 16px 20px; border: 2px solid <?php echo isset($errors['guardian_surname']) ? '#dc3545' : '#f9edd7'; ?>; border-radius: 8px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box;">
+                        <?php if (isset($errors['guardian_surname'])): ?>
+                            <div style="color: #dc3545; font-size: 14px; margin-top: 5px; font-weight: 600;"><?php echo esc_html($errors['guardian_surname']); ?></div>
+                        <?php endif; ?>
+                    </div>
+                    
+                    <div style="margin-bottom: 24px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px; font-size: 15px;">Email Address *</label>
+                        <input type="email" name="guardian_email" required value="<?php echo esc_attr($_POST['guardian_email'] ?? ''); ?>" 
+                               style="width: 100%; padding: 16px 20px; border: 2px solid <?php echo isset($errors['guardian_email']) ? '#dc3545' : '#f9edd7'; ?>; border-radius: 8px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box;"
+                               onblur="checkEmailExists(this.value)">
+                        <?php if (isset($errors['guardian_email'])): ?>
+                            <div style="color: #dc3545; font-size: 14px; margin-top: 5px; font-weight: 600;"><?php echo esc_html($errors['guardian_email']); ?></div>
+                        <?php endif; ?>
+                        
+                        <!-- Conditional Email Exists Section -->
+                        <div id="email-exists-section" style="display: none; background: #fff3cd; border: 2px solid #ffc107; border-radius: 8px; padding: 16px; margin-top: 10px;">
+                            <p style="margin: 0 0 12px 0; color: #856404; font-weight: 600;">Your email address is already registered. Are you registering a new pet?</p>
+                            <div style="margin: 8px 0;">
+                                <label style="display: flex; align-items: center; cursor: pointer; margin-bottom: 8px;">
+                                    <input type="radio" name="existing_email_action" value="yes" onchange="handleEmailChoice()" style="margin-right: 8px;">
+                                    <span style="color: #856404;">Yes, I'm adding a new pet</span>
+                                </label>
+                                <label style="display: flex; align-items: center; cursor: pointer;">
+                                    <input type="radio" name="existing_email_action" value="no" onchange="handleEmailChoice()" style="margin-right: 8px;">
+                                    <span style="color: #856404;">No, take me to sign in</span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div style="margin-bottom: 24px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px; font-size: 15px;">Phone Number *</label>
+                        <input type="tel" name="guardian_phone" required value="<?php echo esc_attr($_POST['guardian_phone'] ?? ''); ?>" 
+                               style="width: 100%; padding: 16px 20px; border: 2px solid <?php echo isset($errors['guardian_phone']) ? '#dc3545' : '#f9edd7'; ?>; border-radius: 8px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box;">
+                        <?php if (isset($errors['guardian_phone'])): ?>
+                            <div style="color: #dc3545; font-size: 14px; margin-top: 5px; font-weight: 600;"><?php echo esc_html($errors['guardian_phone']); ?></div>
+                        <?php endif; ?>
+                    </div>
+                    
+                    <div style="margin-bottom: 24px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px; font-size: 15px;">Address *</label>
+                        <textarea name="guardian_address" required rows="4" 
+                                  style="width: 100%; padding: 16px 20px; border: 2px solid <?php echo isset($errors['guardian_address']) ? '#dc3545' : '#f9edd7'; ?>; border-radius: 8px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box; resize: vertical; min-height: 100px;"><?php echo esc_textarea($_POST['guardian_address'] ?? ''); ?></textarea>
+                        <?php if (isset($errors['guardian_address'])): ?>
+                            <div style="color: #dc3545; font-size: 14px; margin-top: 5px; font-weight: 600;"><?php echo esc_html($errors['guardian_address']); ?></div>
+                        <?php endif; ?>
+                    </div>
+                    
+                    <div style="margin-bottom: 24px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px; font-size: 15px;">State *</label>
+                        <div style="position: relative;">
+                            <select name="guardian_state" required 
+                                    style="width: 100%; padding: 16px 20px; border: 2px solid <?php echo isset($errors['guardian_state']) ? '#dc3545' : '#f9edd7'; ?>; border-radius: 8px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box; appearance: none; cursor: pointer; height: 56px;">
+                                <option value="">Select State</option>
+                                <option value="Abia" <?php selected($_POST['guardian_state'] ?? '', 'Abia'); ?>>Abia</option>
+                                <option value="Adamawa" <?php selected($_POST['guardian_state'] ?? '', 'Adamawa'); ?>>Adamawa</option>
+                                <option value="Akwa Ibom" <?php selected($_POST['guardian_state'] ?? '', 'Akwa Ibom'); ?>>Akwa Ibom</option>
+                                <option value="Anambra" <?php selected($_POST['guardian_state'] ?? '', 'Anambra'); ?>>Anambra</option>
+                                <option value="Bauchi" <?php selected($_POST['guardian_state'] ?? '', 'Bauchi'); ?>>Bauchi</option>
+                                <option value="Bayelsa" <?php selected($_POST['guardian_state'] ?? '', 'Bayelsa'); ?>>Bayelsa</option>
+                                <option value="Benue" <?php selected($_POST['guardian_state'] ?? '', 'Benue'); ?>>Benue</option>
+                                <option value="Borno" <?php selected($_POST['guardian_state'] ?? '', 'Borno'); ?>>Borno</option>
+                                <option value="Cross River" <?php selected($_POST['guardian_state'] ?? '', 'Cross River'); ?>>Cross River</option>
+                                <option value="Delta" <?php selected($_POST['guardian_state'] ?? '', 'Delta'); ?>>Delta</option>
+                                <option value="Ebonyi" <?php selected($_POST['guardian_state'] ?? '', 'Ebonyi'); ?>>Ebonyi</option>
+                                <option value="Edo" <?php selected($_POST['guardian_state'] ?? '', 'Edo'); ?>>Edo</option>
+                                <option value="Ekiti" <?php selected($_POST['guardian_state'] ?? '', 'Ekiti'); ?>>Ekiti</option>
+                                <option value="Enugu" <?php selected($_POST['guardian_state'] ?? '', 'Enugu'); ?>>Enugu</option>
+                                <option value="FCT" <?php selected($_POST['guardian_state'] ?? '', 'FCT'); ?>>FCT (Abuja)</option>
+                                <option value="Gombe" <?php selected($_POST['guardian_state'] ?? '', 'Gombe'); ?>>Gombe</option>
+                                <option value="Imo" <?php selected($_POST['guardian_state'] ?? '', 'Imo'); ?>>Imo</option>
+                                <option value="Jigawa" <?php selected($_POST['guardian_state'] ?? '', 'Jigawa'); ?>>Jigawa</option>
+                                <option value="Kaduna" <?php selected($_POST['guardian_state'] ?? '', 'Kaduna'); ?>>Kaduna</option>
+                                <option value="Kano" <?php selected($_POST['guardian_state'] ?? '', 'Kano'); ?>>Kano</option>
+                                <option value="Katsina" <?php selected($_POST['guardian_state'] ?? '', 'Katsina'); ?>>Katsina</option>
+                                <option value="Kebbi" <?php selected($_POST['guardian_state'] ?? '', 'Kebbi'); ?>>Kebbi</option>
+                                <option value="Kogi" <?php selected($_POST['guardian_state'] ?? '', 'Kogi'); ?>>Kogi</option>
+                                <option value="Kwara" <?php selected($_POST['guardian_state'] ?? '', 'Kwara'); ?>>Kwara</option>
+                                <option value="Lagos" <?php selected($_POST['guardian_state'] ?? '', 'Lagos'); ?>>Lagos</option>
+                                <option value="Nasarawa" <?php selected($_POST['guardian_state'] ?? '', 'Nasarawa'); ?>>Nasarawa</option>
+                                <option value="Niger" <?php selected($_POST['guardian_state'] ?? '', 'Niger'); ?>>Niger</option>
+                                <option value="Ogun" <?php selected($_POST['guardian_state'] ?? '', 'Ogun'); ?>>Ogun</option>
+                                <option value="Ondo" <?php selected($_POST['guardian_state'] ?? '', 'Ondo'); ?>>Ondo</option>
+                                <option value="Osun" <?php selected($_POST['guardian_state'] ?? '', 'Osun'); ?>>Osun</option>
+                                <option value="Oyo" <?php selected($_POST['guardian_state'] ?? '', 'Oyo'); ?>>Oyo</option>
+                                <option value="Plateau" <?php selected($_POST['guardian_state'] ?? '', 'Plateau'); ?>>Plateau</option>
+                                <option value="Rivers" <?php selected($_POST['guardian_state'] ?? '', 'Rivers'); ?>>Rivers</option>
+                                <option value="Sokoto" <?php selected($_POST['guardian_state'] ?? '', 'Sokoto'); ?>>Sokoto</option>
+                                <option value="Taraba" <?php selected($_POST['guardian_state'] ?? '', 'Taraba'); ?>>Taraba</option>
+                                <option value="Yobe" <?php selected($_POST['guardian_state'] ?? '', 'Yobe'); ?>>Yobe</option>
+                                <option value="Zamfara" <?php selected($_POST['guardian_state'] ?? '', 'Zamfara'); ?>>Zamfara</option>
+                            </select>
+                            <svg style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); pointer-events: none;" width="16" height="16" viewBox="0 0 24 24" fill="none">
+                                <path d="M7 10L12 15L17 10H7Z" fill="#145362"/>
+                            </svg>
+                        </div>
+                        <?php if (isset($errors['guardian_state'])): ?>
+                            <div style="color: #dc3545; font-size: 14px; margin-top: 5px; font-weight: 600;"><?php echo esc_html($errors['guardian_state']); ?></div>
+                        <?php endif; ?>
+                    </div>
+                    
+                    <!-- Username and Password Fields (conditional) -->
+                    <div id="credentials-section">
+                        <div style="margin-bottom: 24px;">
+                            <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px; font-size: 15px;">Username *</label>
+                            <input type="text" name="guardian_username" required value="<?php echo esc_attr($_POST['guardian_username'] ?? ''); ?>" 
+                                   id="username-field"
+                                   style="width: 100%; padding: 16px 20px; border: 2px solid <?php echo isset($errors['guardian_username']) ? '#dc3545' : '#f9edd7'; ?>; border-radius: 8px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box;">
+                            <?php if (isset($errors['guardian_username'])): ?>
+                                <div style="color: #dc3545; font-size: 14px; margin-top: 5px; font-weight: 600;"><?php echo esc_html($errors['guardian_username']); ?></div>
+                            <?php endif; ?>
+                        </div>
+                        
+                        <div id="password-fields">
+                            <div style="margin-bottom: 24px;">
+                                <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px; font-size: 15px;">Enter Password *</label>
+                                <div style="position: relative;">
+                                    <input type="password" name="guardian_password" required id="guardian_password"
+                                           style="width: 100%; padding: 16px 50px 16px 20px; border: 2px solid <?php echo isset($errors['guardian_password']) ? '#dc3545' : '#f9edd7'; ?>; border-radius: 8px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box;">
+                                    <button type="button" onclick="togglePassword('guardian_password', this)" style="position: absolute; right: 15px; top: 50%; transform: translateY(-50%); background: none; border: none; color: #666; cursor: pointer; font-size: 14px;">👁️</button>
+                                </div>
+                                <?php if (isset($errors['guardian_password'])): ?>
+                                    <div style="color: #dc3545; font-size: 14px; margin-top: 5px; font-weight: 600;"><?php echo esc_html($errors['guardian_password']); ?></div>
+                                <?php endif; ?>
+                            </div>
+                            
+                            <div style="margin-bottom: 24px;">
+                                <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px; font-size: 15px;">Confirm Password *</label>
+                                <div style="position: relative;">
+                                    <input type="password" name="confirm_password" required id="confirm_password" onblur="validatePasswordMatch()"
+                                           style="width: 100%; padding: 16px 50px 16px 20px; border: 2px solid <?php echo isset($errors['confirm_password']) ? '#dc3545' : '#f9edd7'; ?>; border-radius: 8px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box;">
+                                    <button type="button" onclick="togglePassword('confirm_password', this)" style="position: absolute; right: 15px; top: 50%; transform: translateY(-50%); background: none; border: none; color: #666; cursor: pointer; font-size: 14px;">👁️</button>
+                                </div>
+                                <div id="password-match-error" style="color: #dc3545; font-size: 14px; margin-top: 5px; display: none; font-weight: 600;">Passwords do not match</div>
+                                <?php if (isset($errors['confirm_password'])): ?>
+                                    <div style="color: #dc3545; font-size: 14px; margin-top: 5px; font-weight: 600;"><?php echo esc_html($errors['confirm_password']); ?></div>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Pet Information -->
+                <div class="form-section" style="margin-bottom: 40px;" id="pet-section">
+                    <h3 style="color: #145362; font-size: 20px; font-weight: 800; margin: 0 0 24px 0; display: flex; align-items: center;">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" style="margin-right: 12px;">
+                            <path d="M4.5 12.75L6 11.25L9.75 15L18 6.75L19.5 8.25L9.75 18L4.5 12.75Z" fill="#145362"/>
+                        </svg>
+                        Pet Information
+                    </h3>
+                    
+                    <div style="margin-bottom: 24px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px; font-size: 15px;">Pet Name *</label>
+                        <input type="text" name="pet_name" required value="<?php echo esc_attr($_POST['pet_name'] ?? ''); ?>" 
+                               style="width: 100%; padding: 16px 20px; border: 2px solid <?php echo isset($errors['pet_name']) ? '#dc3545' : '#f9edd7'; ?>; border-radius: 8px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box;">
+                        <?php if (isset($errors['pet_name'])): ?>
+                            <div style="color: #dc3545; font-size: 14px; margin-top: 5px; font-weight: 600;"><?php echo esc_html($errors['pet_name']); ?></div>
+                        <?php endif; ?>
+                    </div>
+                    
+                    <div style="margin-bottom: 24px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px; font-size: 15px;">Pet Type *</label>
+                        <div style="position: relative;">
+                            <select name="pet_type" required 
+                                    style="width: 100%; padding: 16px 20px; border: 2px solid <?php echo isset($errors['pet_type']) ? '#dc3545' : '#f9edd7'; ?>; border-radius: 8px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box; appearance: none; cursor: pointer; height: 56px;">
+                                <option value="">Select Pet Type</option>
+                                <option value="Dog" <?php selected($_POST['pet_type'] ?? '', 'Dog'); ?>>Dog</option>
+                                <option value="Cat" <?php selected($_POST['pet_type'] ?? '', 'Cat'); ?>>Cat</option>
+                            </select>
+                            <svg style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); pointer-events: none;" width="16" height="16" viewBox="0 0 24 24" fill="none">
+                                <path d="M7 10L12 15L17 10H7Z" fill="#145362"/>
+                            </svg>
+                        </div>
+                        <?php if (isset($errors['pet_type'])): ?>
+                            <div style="color: #dc3545; font-size: 14px; margin-top: 5px; font-weight: 600;"><?php echo esc_html($errors['pet_type']); ?></div>
+                        <?php endif; ?>
+                    </div>
+                    
+                    <div style="margin-bottom: 24px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px; font-size: 15px;">Breed *</label>
+                        <input type="text" name="pet_breed" required value="<?php echo esc_attr($_POST['pet_breed'] ?? ''); ?>" 
+                               style="width: 100%; padding: 16px 20px; border: 2px solid <?php echo isset($errors['pet_breed']) ? '#dc3545' : '#f9edd7'; ?>; border-radius: 8px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box;">
+                        <?php if (isset($errors['pet_breed'])): ?>
+                            <div style="color: #dc3545; font-size: 14px; margin-top: 5px; font-weight: 600;"><?php echo esc_html($errors['pet_breed']); ?></div>
+                        <?php endif; ?>
+                    </div>
+                    
+                    <div style="margin-bottom: 24px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px; font-size: 15px;">Age *</label>
+                        <input type="number" name="pet_age" step="1" min="0" max="30" required value="<?php echo esc_attr($_POST['pet_age'] ?? ''); ?>" 
+                               style="width: 100%; padding: 16px 20px; border: 2px solid <?php echo isset($errors['pet_age']) ? '#dc3545' : '#f9edd7'; ?>; border-radius: 8px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box;">
+                        <?php if (isset($errors['pet_age'])): ?>
+                            <div style="color: #dc3545; font-size: 14px; margin-top: 5px; font-weight: 600;"><?php echo esc_html($errors['pet_age']); ?></div>
+                        <?php endif; ?>
+                    </div>
+                    
+                    <div style="margin-bottom: 24px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px; font-size: 15px;">Pet Birthday *</label>
+                        <input type="date" name="pet_birthday" required value="<?php echo esc_attr($_POST['pet_birthday'] ?? ''); ?>" 
+                               style="width: 100%; padding: 16px 20px; border: 2px solid <?php echo isset($errors['pet_birthday']) ? '#dc3545' : '#f9edd7'; ?>; border-radius: 8px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box;">
+                        <?php if (isset($errors['pet_birthday'])): ?>
+                            <div style="color: #dc3545; font-size: 14px; margin-top: 5px; font-weight: 600;"><?php echo esc_html($errors['pet_birthday']); ?></div>
+                        <?php endif; ?>
+                    </div>
+                    
+                    <div style="margin-bottom: 24px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px; font-size: 15px;">Gender *</label>
+                        <div style="position: relative;">
+                            <select name="pet_gender" required 
+                                    style="width: 100%; padding: 16px 20px; border: 2px solid <?php echo isset($errors['pet_gender']) ? '#dc3545' : '#f9edd7'; ?>; border-radius: 8px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box; appearance: none; cursor: pointer; height: 56px;">
+                                <option value="">Select Gender</option>
+                                <option value="Male" <?php selected($_POST['pet_gender'] ?? '', 'Male'); ?>>Male</option>
+                                <option value="Female" <?php selected($_POST['pet_gender'] ?? '', 'Female'); ?>>Female</option>
+                            </select>
+                            <svg style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); pointer-events: none;" width="16" height="16" viewBox="0 0 24 24" fill="none">
+                                <path d="M7 10L12 15L17 10H7Z" fill="#145362"/>
+                            </svg>
+                        </div>
+                        <?php if (isset($errors['pet_gender'])): ?>
+                            <div style="color: #dc3545; font-size: 14px; margin-top: 5px; font-weight: 600;"><?php echo esc_html($errors['pet_gender']); ?></div>
+                        <?php endif; ?>
+                    </div>
+                    
+                    <div style="margin-bottom: 24px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px; font-size: 15px;">Color *</label>
+                        <input type="text" name="pet_color" required value="<?php echo esc_attr($_POST['pet_color'] ?? ''); ?>" 
+                               style="width: 100%; padding: 16px 20px; border: 2px solid <?php echo isset($errors['pet_color']) ? '#dc3545' : '#f9edd7'; ?>; border-radius: 8px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box;">
+                        <?php if (isset($errors['pet_color'])): ?>
+                            <div style="color: #dc3545; font-size: 14px; margin-top: 5px; font-weight: 600;"><?php echo esc_html($errors['pet_color']); ?></div>
+                        <?php endif; ?>
+                    </div>
+                    
+                    <div style="margin-bottom: 24px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px; font-size: 15px;">Pet Picture *</label>
+                        <div style="position: relative;">
+                            <input type="file" name="profile_picture" accept="image/*" required id="pet-picture-input" style="position: absolute; opacity: 0; width: 100%; height: 100%; cursor: pointer; z-index: 2;">
+                            <div style="width: 100%; padding: 16px 20px; border: 2px solid <?php echo isset($errors['profile_picture']) ? '#dc3545' : '#f9edd7'; ?>; border-radius: 8px; font-size: 16px; background: #ffffff; cursor: pointer; text-align: center; position: relative; z-index: 1;" onclick="document.getElementById('pet-picture-input').click();">
+                                <span id="upload-text">Upload Picture</span>
+                            </div>
+                        </div>
+                        <div id="image-preview" style="margin-top: 10px; display: none;">
+                            <img id="preview-img" style="max-width: 200px; max-height: 200px; border-radius: 8px; border: 2px solid #f9edd7;">
+                        </div>
+                        <?php if (isset($errors['profile_picture'])): ?>
+                            <div style="color: #dc3545; font-size: 14px; margin-top: 5px; font-weight: 600;"><?php echo esc_html($errors['profile_picture']); ?></div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                
+                <!-- Choose Your Plan -->
+                <div class="form-section" style="margin-bottom: 40px;" id="plan-section">
+                    <h3 style="color: #145362; font-size: 20px; font-weight: 800; margin: 0 0 24px 0; display: flex; align-items: center;">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" style="margin-right: 12px;">
+                            <path d="M12 2L13.09 8.26L20 9L13.09 9.74L12 16L10.91 9.74L4 9L10.91 8.26L12 2Z" fill="#145362"/>
+                        </svg>
+                        Choose Your Plan
+                    </h3>
+                    
+                    <div style="margin-bottom: 24px;">
+                        <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 8px; font-size: 15px;">Plan Duration *</label>
+                        <div style="position: relative;">
+                            <select name="plan_duration" required onchange="updatePlanPrices()" 
+                                    style="width: 100%; padding: 16px 20px; border: 2px solid <?php echo isset($errors['plan_duration']) ? '#dc3545' : '#f9edd7'; ?>; border-radius: 8px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box; appearance: none; cursor: pointer; height: 56px;">
+                                <option value="">Select Duration</option>
+                                <option value="monthly" <?php selected($_POST['plan_duration'] ?? '', 'monthly'); ?>>Monthly</option>
+                                <option value="quarterly" <?php selected($_POST['plan_duration'] ?? '', 'quarterly'); ?>>Quarterly</option>
+                                <option value="annual" <?php selected($_POST['plan_duration'] ?? '', 'annual'); ?>>Annual</option>
+                            </select>
+                            <svg style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); pointer-events: none;" width="16" height="16" viewBox="0 0 24 24" fill="none">
+                                <path d="M7 10L12 15L17 10H7Z" fill="#145362"/>
+                            </svg>
+                        </div>
+                        <?php if (isset($errors['plan_duration'])): ?>
+                            <div style="color: #dc3545; font-size: 14px; margin-top: 5px; font-weight: 600;"><?php echo esc_html($errors['plan_duration']); ?></div>
+                        <?php endif; ?>
+                    </div>
+                    
+                    <div class="plan-options" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-bottom: 30px;">
+                        <!-- Pawtastic Plan -->
+                        <div class="plan-option" style="border: 2px solid <?php echo (isset($errors['plan_type']) && ($_POST['plan_type'] ?? '') === 'pawtastic') ? '#dc3545' : '#f9edd7'; ?>; border-radius: 12px; padding: 20px; cursor: pointer; transition: all 0.3s ease;" onclick="selectPlan('pawtastic', this)">
+                            <input type="radio" name="plan_type" value="pawtastic" style="margin-bottom: 12px;" <?php checked($_POST['plan_type'] ?? '', 'pawtastic'); ?>>
+                            <h4 style="margin: 0 0 10px 0; color: #145362; font-size: 18px; font-weight: 700;">Pawtastic Plan</h4>
+                            <p style="margin: 0; font-size: 16px; color: #145362; font-weight: 600;" class="plan-price" data-plan="pawtastic">₦8,000/month</p>
+                        </div>
+                        
+                        <!-- Furrtastic Plan -->
+                        <div class="plan-option" style="border: 2px solid <?php echo (isset($errors['plan_type']) && ($_POST['plan_type'] ?? '') === 'furrtastic') ? '#dc3545' : '#f9edd7'; ?>; border-radius: 12px; padding: 20px; cursor: pointer; transition: all 0.3s ease;" onclick="selectPlan('furrtastic', this)">
+                            <input type="radio" name="plan_type" value="furrtastic" style="margin-bottom: 12px;" <?php checked($_POST['plan_type'] ?? '', 'furrtastic'); ?>>
+                            <h4 style="margin: 0 0 10px 0; color: #145362; font-size: 18px; font-weight: 700;">Furrtastic Plan</h4>
+                            <p style="margin: 0; font-size: 16px; color: #145362; font-weight: 600;" class="plan-price" data-plan="furrtastic">₦16,000/month</p>
+                        </div>
+                        
+                        <!-- Purrfect Plan -->
+                        <div class="plan-option" style="border: 2px solid <?php echo (isset($errors['plan_type']) && ($_POST['plan_type'] ?? '') === 'purrfect') ? '#dc3545' : '#f9edd7'; ?>; border-radius: 12px; padding: 20px; cursor: pointer; transition: all 0.3s ease;" onclick="selectPlan('purrfect', this)">
+                            <input type="radio" name="plan_type" value="purrfect" style="margin-bottom: 12px;" <?php checked($_POST['plan_type'] ?? '', 'purrfect'); ?>>
+                            <h4 style="margin: 0 0 10px 0; color: #145362; font-size: 18px; font-weight: 700;">Purrfect Plan</h4>
+                            <p style="margin: 0; font-size: 16px; color: #145362; font-weight: 600;" class="plan-price" data-plan="purrfect">₦32,000/month</p>
+                        </div>
+                    </div>
+                    <?php if (isset($errors['plan_type'])): ?>
+                        <div style="color: #dc3545; font-size: 14px; margin-top: 5px; font-weight: 600;"><?php echo esc_html($errors['plan_type']); ?></div>
+                    <?php endif; ?>
+                    
+                    <!-- Total Amount Due Section with Red Border -->
+                    <div id="total-amount-section" style="display: none; background: #fff5f5; border: 2px solid #dc3545; border-radius: 12px; padding: 20px; text-align: center; margin-top: 20px;">
+                        <h4 style="margin: 0 0 10px 0; color: #dc3545; font-size: 18px; font-weight: 700;">Total Amount Due:</h4>
+                        <p id="total-amount-display" style="margin: 0; font-size: 24px; color: #dc3545; font-weight: 800;">₦0</p>
+                    </div>
+                </div>
+                
+                <!-- Marketing Consent Checkbox -->
+                <div style="margin-bottom: 30px;" id="marketing-section">
+                    <label style="display: flex; align-items: flex-start; cursor: pointer; font-size: 14px; line-height: 1.5;">
+                        <input type="checkbox" name="marketing_consent" value="1" <?php checked(isset($_POST['marketing_consent'])); ?> style="margin: 2px 12px 0 0; transform: scale(1.2);">
+                        <span style="color: #666;">Send me tips to keep my pet healthy and safe</span>
+                    </label>
+                </div>
+                
+                <!-- Submit Button -->
+                <div style="text-align: center; padding-top: 20px;" id="submit-section">
+                    <button type="submit" name="submit_pet_signup" style="background: linear-gradient(135deg, #145362, #2c7a8c); color: #ffffff; border: none; padding: 18px 50px; border-radius: 12px; font-size: 18px; font-weight: 700; cursor: pointer; transition: all 0.3s ease; min-width: 200px;">
+                        Sign Up
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <script>
+    const planPricing = {
+        pawtastic: { monthly: 8000, quarterly: 22800, annual: 89280 },
+        furrtastic: { monthly: 16000, quarterly: 45600, annual: 178560 },
+        purrfect: { monthly: 32000, quarterly: 91200, annual: 357120 }
+    };
+    
+    // Check if email exists
+    function checkEmailExists(email) {
+        if (!email) return;
+        
+        fetch('<?php echo admin_url('admin-ajax.php'); ?>', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: `action=check_email_exists&email=${encodeURIComponent(email)}`
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.exists) {
+                document.getElementById('email-exists-section').style.display = 'block';
+            } else {
+                document.getElementById('email-exists-section').style.display = 'none';
+                resetFormToNewUser();
+            }
+        })
+        .catch(error => {
+            console.error('Error checking email:', error);
+        });
+    }
+    
+    // Handle email choice radio selection
+    function handleEmailChoice() {
+        const selectedValue = document.querySelector('input[name="existing_email_action"]:checked')?.value;
+        
+        if (selectedValue === 'yes') {
+            // Hide password fields and make username readonly for existing users
+            document.getElementById('password-fields').style.display = 'none';
+            document.getElementById('username-field').readOnly = true;
+            document.getElementById('username-field').style.backgroundColor = '#f5f5f5';
+            
+            // Remove required attributes from password fields
+            document.getElementById('guardian_password').removeAttribute('required');
+            document.getElementById('confirm_password').removeAttribute('required');
+            
+            // Auto-fill username from existing account
+            const email = document.querySelector('[name="guardian_email"]').value;
+            if (email) {
+                fetch('<?php echo admin_url('admin-ajax.php'); ?>', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `action=get_username_by_email&email=${encodeURIComponent(email)}`
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.username) {
+                        document.getElementById('username-field').value = data.username;
+                    }
+                });
+            }
+        } else if (selectedValue === 'no') {
+            // Submit form to redirect to login
+            document.getElementById('pet-signup-form').submit();
+        }
+    }
+    
+    // Reset form to new user state
+    function resetFormToNewUser() {
+        document.getElementById('password-fields').style.display = 'block';
+        document.getElementById('username-field').readOnly = false;
+        document.getElementById('username-field').style.backgroundColor = '#ffffff';
+        document.getElementById('guardian_password').setAttribute('required', 'required');
+        document.getElementById('confirm_password').setAttribute('required', 'required');
+    }
+    
+    // Password visibility toggle
+    function togglePassword(fieldId, button) {
+        const field = document.getElementById(fieldId);
+        if (field.type === 'password') {
+            field.type = 'text';
+            button.textContent = '🙈';
+        } else {
+            field.type = 'password';
+            button.textContent = '👁️';
+        }
+    }
+    
+    // Real-time password match validation
+    function validatePasswordMatch() {
+        const password = document.getElementById('guardian_password').value;
+        const confirmPassword = document.getElementById('confirm_password').value;
+        const errorDiv = document.getElementById('password-match-error');
+        const confirmField = document.getElementById('confirm_password');
+        
+        if (confirmPassword && password !== confirmPassword) {
+            errorDiv.style.display = 'block';
+            confirmField.style.borderColor = '#dc3545';
+        } else {
+            errorDiv.style.display = 'none';
+            confirmField.style.borderColor = '#f9edd7';
+        }
+    }
+    
+    // Handle image preview
+    document.getElementById('pet-picture-input').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (file) {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                document.getElementById('preview-img').src = e.target.result;
+                document.getElementById('image-preview').style.display = 'block';
+                document.getElementById('upload-text').textContent = 'Picture Selected: ' + file.name;
+            };
+            reader.readAsDataURL(file);
+        }
+    });
+    
+    function updatePlanPrices() {
+        const duration = document.querySelector('[name="plan_duration"]').value;
+        if (!duration) {
+            document.getElementById('total-amount-section').style.display = 'none';
+            return;
+        }
+        
+        const durationText = duration === 'monthly' ? '/month' : 
+                            duration === 'quarterly' ? '/quarter' : 
+                            '/year';
+        
+        document.querySelectorAll('.plan-price').forEach(priceEl => {
+            const plan = priceEl.getAttribute('data-plan');
+            const price = planPricing[plan][duration];
+            priceEl.textContent = `₦${price.toLocaleString()}${durationText}`;
+        });
+        
+        updateTotalAmount();
+    }
+    
+    function selectPlan(planType, element) {
+        // Remove selection from all plans
+        document.querySelectorAll('.plan-option').forEach(plan => {
+            plan.style.borderColor = '#f9edd7';
+            plan.style.backgroundColor = '#ffffff';
+        });
+        
+        // Select this plan
+        element.style.borderColor = '#145362';
+        element.style.backgroundColor = '#f8fcfd';
+        element.querySelector('input[type="radio"]').checked = true;
+        
+        updateTotalAmount();
+    }
+    
+    function updateTotalAmount() {
+        const selectedPlan = document.querySelector('input[name="plan_type"]:checked');
+        const duration = document.querySelector('[name="plan_duration"]').value;
+        
+        if (selectedPlan && duration) {
+            const planType = selectedPlan.value;
+            const totalAmount = planPricing[planType][duration];
+            
+            document.getElementById('total-amount-display').textContent = `₦${totalAmount.toLocaleString()}`;
+            document.getElementById('total-amount-section').style.display = 'block';
+        } else {
+            document.getElementById('total-amount-section').style.display = 'none';
+        }
+    }
+    
+    // Auto-scroll to first error field
+    function scrollToFirstError() {
+        const firstError = document.querySelector('[style*="border: 2px solid #dc3545"]');
+        if (firstError) {
+            firstError.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            firstError.focus();
+        }
+    }
+    
+    // Initialize on page load
+    document.addEventListener('DOMContentLoaded', function() {
+        const duration = document.querySelector('[name="plan_duration"]').value;
+        if (duration) {
+            updatePlanPrices();
+        }
+        
+        // Check if a plan is already selected
+        const selectedPlan = document.querySelector('input[name="plan_type"]:checked');
+        if (selectedPlan) {
+            const planOption = selectedPlan.closest('.plan-option');
+            planOption.style.borderColor = '#145362';
+            planOption.style.backgroundColor = '#f8fcfd';
+            updateTotalAmount();
+        }
+        
+        // Scroll to first error if form was submitted with errors
+        <?php if (!empty($errors)): ?>
+        setTimeout(scrollToFirstError, 100);
+        <?php endif; ?>
+        
+        // Add birthday validation
+        document.querySelector('[name="pet_birthday"]').addEventListener('change', function(e) {
+            const birthday = new Date(this.value);
+            const today = new Date();
+            const ageInput = document.querySelector('[name="pet_age"]');
+            
+            if (birthday > today) {
+                this.setCustomValidity('Birthday cannot be in the future');
+                this.style.borderColor = '#dc3545';
+                return;
+            } else {
+                this.setCustomValidity('');
+                this.style.borderColor = '#f9edd7';
+            }
+            
+            // Calculate and suggest age based on birthday
+            const ageYears = Math.floor((today - birthday) / (365.25 * 24 * 60 * 60 * 1000));
+            if (ageYears >= 0 && ageYears <= 30) {
+                ageInput.value = ageYears;
+            }
+        });
+
+        // Add age validation to sync with birthday
+        document.querySelector('[name="pet_age"]').addEventListener('change', function(e) {
+            const age = parseInt(this.value);
+            const birthdayInput = document.querySelector('[name="pet_birthday"]');
+            
+            if (!birthdayInput.value && age > 0) {
+                // Suggest a birthday if none is set
+                const today = new Date();
+                const birthYear = today.getFullYear() - age;
+                const suggestedDate = new Date(birthYear, 0, 1); // January 1st of birth year
+                birthdayInput.value = suggestedDate.toISOString().split('T')[0];
+            }
+        });
+    });
+    </script>
+    
+    <?php
+    return ob_get_clean();
+}
+
+// AJAX handler for checking email existence
+add_action('wp_ajax_check_email_exists', 'skeepy_ajax_check_email_exists');
+add_action('wp_ajax_nopriv_check_email_exists', 'skeepy_ajax_check_email_exists');
+
+function skeepy_ajax_check_email_exists() {
+    $email = sanitize_email($_POST['email']);
+    $existing = skeepy_check_email_exists($email);
+    
+    wp_send_json([
+        'exists' => !empty($existing),
+        'username' => $existing ? $existing->guardian_username : null
+    ]);
+}
+
+// AJAX handler for getting username by email
+add_action('wp_ajax_get_username_by_email', 'skeepy_ajax_get_username_by_email');
+add_action('wp_ajax_nopriv_get_username_by_email', 'skeepy_ajax_get_username_by_email');
+
+function skeepy_ajax_get_username_by_email() {
+    $email = sanitize_email($_POST['email']);
+    $existing = skeepy_check_email_exists($email);
+    
+    wp_send_json([
+        'username' => $existing ? $existing->guardian_username : null
+    ]);
+}
+
+// Register shortcode
+add_shortcode('skeepy_pet_signup', 'skeepy_pet_signup_form_shortcode');

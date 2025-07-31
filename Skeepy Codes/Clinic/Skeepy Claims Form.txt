@@ -1,0 +1,1421 @@
+/**
+ * WPCode Snippet 7: Clinic Claims Form (Final - Complete Services List)
+ * Claims submission form for veterinary clinics only - All services included
+ */
+
+// Create claims table if it doesn't exist - FIXED STRUCTURE
+function skeepy_create_claims_table() {
+    global $wpdb;
+    $claims_table = $wpdb->prefix . 'skeepy_claims';
+    
+    $charset_collate = $wpdb->get_charset_collate();
+    
+    // CHECK IF TABLE EXISTS FIRST - DO NOT DROP EXISTING DATA
+    $table_exists = $wpdb->get_var("SHOW TABLES LIKE '$claims_table'");
+    
+    if ($table_exists != $claims_table) {
+        // Only create table if it doesn't exist - PRESERVES ALL EXISTING CLAIMS
+    
+    $sql = "CREATE TABLE $claims_table (
+        id int(11) NOT NULL AUTO_INCREMENT,
+        claim_id varchar(50) NOT NULL,
+        patient_hmo_id varchar(100) NOT NULL,
+        clinic_name varchar(255) NOT NULL,
+        provider_id varchar(100) NOT NULL,
+        veterinarian_name varchar(255) NOT NULL,
+        treatment_date date NOT NULL,
+        submission_date datetime NOT NULL,
+        symptoms longtext,
+        diagnosis longtext,
+        treatment longtext,
+        services longtext,
+        custom_fees longtext,
+        quantities longtext,
+        total_amount varchar(50) NOT NULL,
+        status varchar(50) DEFAULT 'pending',
+        submitted_by int(11) NOT NULL,
+        created_at timestamp DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY claim_id (claim_id)
+    ) $charset_collate;";
+    
+        $result = $wpdb->query($sql);
+        error_log("Table creation result: " . ($result !== false ? 'success' : 'failed'));
+        if ($result === false) {
+            error_log("Table creation error: " . $wpdb->last_error);
+        }
+    } else {
+        error_log("Claims table already exists - preserving all existing claims data");
+    }
+}
+
+// Generate unique Claim ID with SK-date-6chars format
+function skeepy_generate_claim_id() {
+    $prefix = 'SK';
+    $date = date('Ymd'); // YYYYMMDD format
+    $characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    
+    // Generate 6 random characters
+    $random = '';
+    for ($i = 0; $i < 6; $i++) {
+        $random .= $characters[rand(0, strlen($characters) - 1)];
+    }
+    
+    return $prefix . '-' . $date . '-' . $random;
+}
+
+function skeepy_claims_form_shortcode() {
+    // Create claims table if it doesn't exist
+    skeepy_create_claims_table();
+    
+    // Authentication check - Only accessible to logged-in clinic partners
+    if (!is_user_logged_in()) {
+        return '<div style="text-align: center; padding: 40px; color: #145362; font-size: 18px;">Please log in to access the claims form.</div>';
+    }
+    
+    $current_user = wp_get_current_user();
+    $user_roles = $current_user->roles;
+    
+    // Check if user is a clinic partner
+    if (!in_array('skeepy_clinic', $user_roles)) {
+        return '<div style="text-align: center; padding: 40px; color: #dc3545; font-size: 18px;">Access denied. This form is only available to registered clinic partners.</div>';
+    }
+    
+    // Get clinic data for current user - REAL DATA NOT MADE UP
+    global $wpdb;
+    $clinics_table = $wpdb->prefix . 'skeepy_clinics';
+    
+    $clinic_data = $wpdb->get_row($wpdb->prepare(
+        "SELECT * FROM $clinics_table WHERE clinic_email = %s",
+        $current_user->user_email
+    ));
+    
+    $clinic_name = $clinic_data ? $clinic_data->clinic_name : 'Unknown Clinic';
+    $provider_id = $clinic_data ? $clinic_data->provider_id : 'Unknown';
+    
+    // Get clinic services from actual signup data - NO RANDOM SERVICES
+    $clinic_services = array();
+    if ($clinic_data && $clinic_data->services_offered) {
+        $services_offered = $clinic_data->services_offered;
+        
+        // Parse services from database - they're stored as JSON array
+        if (strpos($services_offered, '[{') === 0) {
+            // JSON format from database
+            $services_data = json_decode($services_offered, true);
+            
+            if ($services_data && is_array($services_data)) {
+                foreach ($services_data as $service_data) {
+                    if (isset($service_data['service']) && isset($service_data['original_fee'])) {
+                        $service_name = $service_data['service'];
+                        // Map old service names to new ones
+                        if ($service_name == 'Tumor Removal') $service_name = 'Mass Removal';
+                        if ($service_name == 'Wound Care') $service_name = 'Wound Repair';
+                        $original_fee = floatval($service_data['original_fee']);
+                        
+                        // Updated discount rates with exact service specifications
+                        if (stripos($service_name, 'General Consultation') !== false || 
+                            stripos($service_name, 'Basic Grooming') !== false || 
+                            stripos($service_name, 'Premium Grooming') !== false || 
+                            stripos($service_name, 'Dental Cleaning') !== false || 
+                            stripos($service_name, 'Comprehensive Physical Exam') !== false || 
+                            stripos($service_name, 'Basic Blood Work') !== false || 
+                            stripos($service_name, 'Wound Repair') !== false || 
+                            stripos($service_name, 'Tail Removal') !== false || 
+                            stripos($service_name, 'Other Surgeries') !== false || 
+                            stripos($service_name, 'Pet Boarding') !== false || 
+                            stripos($service_name, 'Emergency Boarding Support') !== false || 
+                            stripos($service_name, 'Pet Sitting') !== false) {
+                            $discount_rate = 15;
+                        } elseif (stripos($service_name, 'Routine Medication') !== false || 
+                                 stripos($service_name, 'Chronic Disease Medication') !== false || 
+                                 stripos($service_name, 'Supplements Prescribed') !== false) {
+                            $discount_rate = 0;
+                        } else {
+                            $discount_rate = 10;
+                        }
+                        
+                        $clinic_services[$service_name] = array(
+                            'fee' => $original_fee,
+                            'discount' => $discount_rate,
+                            'has_custom_fee' => ($original_fee <= 0),
+                            'has_quantity' => (stripos($service_name, 'Pet boarding') !== false || stripos($service_name, 'Pet sitting') !== false),
+                            'unit' => (stripos($service_name, 'Pet boarding') !== false ? 'Days' : (stripos($service_name, 'Pet sitting') !== false ? 'Hours' : ''))
+                        );
+                    }
+                }
+            }
+        } else {
+            // Fallback for simple comma-separated format
+            $services_array = explode(',', $services_offered);
+            $services_array = array_map('trim', $services_array);
+            $services_array = array_filter($services_array);
+            
+            foreach ($services_array as $service_line) {
+                $service_line = trim($service_line);
+                if ($service_line) {
+                    // Default values for simple format - pull from actual signup data
+                    $service_name = $service_line;
+                    // Map old service names to new ones
+                    if ($service_name == 'Tumor Removal') $service_name = 'Mass Removal';
+                    if ($service_name == 'Wound Care') $service_name = 'Wound Repair';
+                    // Updated discount rates with exact service specifications
+                    if (stripos($service_name, 'General Consultation') !== false || 
+                        stripos($service_name, 'Basic Grooming') !== false || 
+                        stripos($service_name, 'Premium Grooming') !== false || 
+                        stripos($service_name, 'Dental Cleaning') !== false || 
+                        stripos($service_name, 'Comprehensive Physical Exam') !== false || 
+                        stripos($service_name, 'Basic Blood Work') !== false || 
+                        stripos($service_name, 'Wound Repair') !== false || 
+                        stripos($service_name, 'Tail Removal') !== false || 
+                        stripos($service_name, 'Other Surgeries') !== false || 
+                        stripos($service_name, 'Pet Boarding') !== false || 
+                        stripos($service_name, 'Emergency Boarding Support') !== false || 
+                        stripos($service_name, 'Pet Sitting') !== false) {
+                        $discount_rate = 15;
+                    } elseif (stripos($service_name, 'Routine Medication') !== false || 
+                             stripos($service_name, 'Chronic Disease Medication') !== false || 
+                             stripos($service_name, 'Supplements Prescribed') !== false) {
+                        $discount_rate = 0;
+                    } else {
+                        $discount_rate = 10;
+                    }
+                    
+                    $clinic_services[$service_name] = array(
+                        'fee' => 5000, // Default fee
+                        'discount' => $discount_rate,
+                        'has_custom_fee' => false,
+                        'has_quantity' => (stripos($service_name, 'Pet boarding') !== false || stripos($service_name, 'Pet sitting') !== false),
+                        'unit' => (stripos($service_name, 'Pet boarding') !== false ? 'Days' : (stripos($service_name, 'Pet sitting') !== false ? 'Hours' : ''))
+                    );
+                }
+            }
+        }
+    }
+    
+    ob_start();
+    ?>
+    <div class="skeepy-claims-form" style="max-width: 800px; margin: 0 auto; padding: 40px 20px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+        <div class="claims-container" style="background: #ffffff; padding: 50px; border-radius: 20px; box-shadow: 0 15px 50px rgba(20, 83, 98, 0.1); border: 1px solid rgba(249, 237, 215, 0.5);">
+            
+            <!-- Success Message Container -->
+            <div id="success-message" style="display: none; background: #dcfce7; color: #166534; padding: 30px; border-radius: 15px; text-align: center; margin-bottom: 30px;">
+                <h2 style="margin: 0 0 15px 0; font-size: 24px;">🎉 Claim Submitted Successfully!</h2>
+                <p style="margin: 0 0 15px 0; font-size: 18px;" id="success-claim-id"></p>
+                <p style="margin: 0; font-size: 16px;">Confirmation email has been sent to you.</p>
+                <button onclick="submitAnotherClaim()" style="background: white; color: #10b981; border: none; padding: 12px 24px; border-radius: 8px; font-weight: 600; margin-top: 20px; cursor: pointer;">Submit Another Claim</button>
+            </div>
+            
+            <!-- Form Container -->
+            <div id="form-container">
+                <div class="claim-id-display" style="background: linear-gradient(135deg, #145362, #2c7a8c); color: #ffffff; padding: 20px; border-radius: 12px; text-align: center; margin-bottom: 30px; font-weight: 700; font-size: 16px;">
+                    Claims ID
+                    <span style="font-size: 24px; display: block; margin-top: 8px; color: #f9edd7; letter-spacing: 1px;" id="claim-id"><?php echo skeepy_generate_claim_id(); ?></span>
+                </div>
+                
+                <form id="skeepy-claims-form" method="post" enctype="multipart/form-data">
+                    <?php wp_nonce_field('skeepy_claims_nonce', '_wpnonce', true, true); ?>
+                    <!-- Patient Information -->
+                    <div class="form-section" style="margin-bottom: 40px;">
+                        <h3 style="color: #145362; font-size: 22px; font-weight: 800; margin: 0 0 25px 0; padding-bottom: 10px; border-bottom: 2px solid #f9edd7;">Patient Information</h3>
+                        
+                        <div style="display: grid; grid-template-columns: 1fr auto; gap: 20px; align-items: end; margin-bottom: 25px;">
+                            <div>
+                                <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 10px; font-size: 16px;">Pet HMO ID *</label>
+                                <div style="position: relative;">
+                                    <span style="position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: #145362; font-weight: 600; font-size: 16px; z-index: 2; letter-spacing: 0;">SKEEPYHMO-</span>
+                                    <input type="text" id="patient_hmo_id" name="patient_hmo_id" required maxlength="6" style="width: 100%; padding: 16px 16px 16px 120px; border: 2px solid #f9edd7; border-radius: 12px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box; letter-spacing: 0;">
+                                </div>
+                                <div id="hmo-error-message" style="display: none; color: #dc3545; font-size: 14px; margin-top: 8px; font-weight: 600;">HMO ID does not exist</div>
+                            </div>
+                            
+                            <div>
+                                <button type="button" id="verify-hmo-btn" onclick="verifyHMOID()" style="background: #145362; color: #ffffff; padding: 16px 24px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.3s ease; white-space: nowrap;">Verify Patient</button>
+                            </div>
+                        </div>
+                        
+                        <div id="patient-info-display" style="display: none; position: relative; background: #f8fcfd; border: 2px solid #145362; border-radius: 12px; padding: 20px; margin-top: 15px;">
+                            <button type="button" id="close-patient-info" onclick="closePatientInfo()" style="position: absolute; top: 10px; right: 10px; background: #dc3545; color: white; border: none; border-radius: 50%; width: 30px; height: 30px; cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center; font-weight: bold;">×</button>
+                            <h4 style="color: #145362; margin: 0 0 15px 0; font-size: 18px; font-weight: 700;">Pet Information</h4>
+                            <div id="patient-details"></div>
+                        </div>
+                    </div>
+                    
+                    <!-- Clinic Information -->
+                    <div class="form-section" style="margin-bottom: 40px;">
+                        <h3 style="color: #145362; font-size: 22px; font-weight: 800; margin: 0 0 25px 0; padding-bottom: 10px; border-bottom: 2px solid #f9edd7;">Clinic Information</h3>
+                        
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 25px; margin-bottom: 25px;">
+                            <div>
+                                <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 10px; font-size: 16px;">Clinic Name</label>
+                                <input type="text" id="clinic_name" name="clinic_name" value="<?php echo esc_attr($clinic_name); ?>" readonly style="width: 100%; padding: 16px; border: 2px solid #f9edd7; border-radius: 12px; font-size: 16px; background: #f8f9fa; box-sizing: border-box;">
+                            </div>
+                            
+                            <div>
+                                <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 10px; font-size: 16px;">Provider ID</label>
+                                <input type="text" id="provider_id" name="provider_id" value="<?php echo esc_attr($provider_id); ?>" readonly style="width: 100%; padding: 16px; border: 2px solid #f9edd7; border-radius: 12px; font-size: 16px; background: #f8f9fa; box-sizing: border-box;">
+                            </div>
+                        </div>
+                        
+                        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 25px;">
+                            <div>
+                                <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 10px; font-size: 16px;">Attended to By *</label>
+                                <input type="text" id="veterinarian_name" name="veterinarian_name" required style="width: 100%; padding: 16px; border: 2px solid #f9edd7; border-radius: 12px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box;">
+                            </div>
+                            
+                            <div>
+                                <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 10px; font-size: 16px;">Treatment Date *</label>
+                                <input type="date" id="treatment_date" name="treatment_date" required max="<?php echo date('Y-m-d'); ?>" style="width: 100%; padding: 16px; border: 2px solid #f9edd7; border-radius: 12px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box;">
+                            </div>
+                            
+                            <div>
+                                <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 10px; font-size: 16px;">Claims Submission Date</label>
+                                <input type="text" id="submission_date" name="submission_date" value="<?php echo wp_date('Y-m-d g:i A'); ?>" readonly style="width: 100%; padding: 16px; border: 2px solid #f9edd7; border-radius: 12px; font-size: 16px; background: #f8f9fa; box-sizing: border-box;">
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Treatment Details -->
+                    <div class="form-section" style="margin-bottom: 40px;">
+                        <h3 style="color: #145362; font-size: 22px; font-weight: 800; margin: 0 0 25px 0; padding-bottom: 10px; border-bottom: 2px solid #f9edd7;">Treatment Details</h3>
+                        
+                        <div style="margin-bottom: 25px;">
+                            <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 10px; font-size: 16px;">Symptoms</label>
+                            <textarea id="symptoms" name="symptoms" rows="3" style="width: 100%; padding: 16px; border: 2px solid #f9edd7; border-radius: 12px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box;"></textarea>
+                        </div>
+                        
+                        <div style="margin-bottom: 25px;">
+                            <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 10px; font-size: 16px;">Diagnosis</label>
+                            <textarea id="diagnosis" name="diagnosis" rows="3" style="width: 100%; padding: 16px; border: 2px solid #f9edd7; border-radius: 12px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box;"></textarea>
+                        </div>
+                        
+                        <div style="margin-bottom: 25px;">
+                            <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 10px; font-size: 16px;">Treatment</label>
+                            <textarea id="treatment" name="treatment" rows="3" style="width: 100%; padding: 16px; border: 2px solid #f9edd7; border-radius: 12px; font-size: 16px; transition: all 0.3s ease; background: #ffffff; box-sizing: border-box;"></textarea>
+                        </div>
+                        
+                        <div>
+                            <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 10px; font-size: 16px;">Services Provided *</label>
+                            <div class="service-selection" style="display: grid; gap: 15px; margin-top: 20px;" id="service-selection">
+                                <?php
+                                if (!empty($clinic_services)):
+                                    foreach ($clinic_services as $service => $details): 
+                                        $discounted_fee = $details['fee'] * (1 - $details['discount'] / 100);
+                                        // Map old service names to new names
+                                        $display_name = $service;
+                                        if ($service == 'Tumor Removal') $display_name = 'Mass Removal';
+                                        elseif ($service == 'Wound Care') $display_name = 'Wound Repair';
+                                    ?>
+                                        <div class="service-item" style="padding: 16px; background: #ffffff; border: 2px solid #f9edd7; border-radius: 12px; transition: all 0.3s ease;">
+                                            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;">
+                                                <div style="display: flex; align-items: center; gap: 15px;">
+                                                    <input type="checkbox" class="service-checkbox" name="services[]" value="<?php echo htmlspecialchars($service); ?>" 
+                                                           data-fee="<?php echo $details['fee']; ?>" 
+                                                           data-discount="<?php echo $details['discount']; ?>"
+                                                           data-has-custom-fee="<?php echo $details['has_custom_fee'] ? 'true' : 'false'; ?>"
+                                                           data-has-quantity="<?php echo $details['has_quantity'] ? 'true' : 'false'; ?>"
+                                                           data-unit="<?php echo $details['unit']; ?>"
+                                                           style="width: 20px; height: 20px; margin: 0; accent-color: #145362;" 
+                                                           onchange="toggleServiceDetails(this)">
+                                                    <span style="font-weight: 600; color: #145362;"><?php echo htmlspecialchars($display_name); ?></span>
+                                                </div>
+                                                <div style="text-align: right;">
+                                                    <?php if ($details['has_custom_fee']): ?>
+                                                        <?php if ($details['discount'] > 0): ?>
+                                                            <div style="color: #10b981; font-size: 12px; font-weight: 600;"><?php echo $details['discount']; ?>% Skeepy Discount Applied</div>
+                                                        <?php else: ?>
+                                                            <div style="color: #718096; font-size: 12px; font-weight: 600;">No Discount</div>
+                                                        <?php endif; ?>
+                                                    <?php else: ?>
+                                                        <?php if ($details['fee'] > 0): ?>
+                                                            <div style="text-decoration: line-through; color: #718096; font-size: 14px;">₦<?php echo number_format($details['fee']); ?></div>
+                                                            <div style="color: #145362; font-weight: 700; font-size: 16px;">₦<?php echo number_format($discounted_fee); ?></div>
+                                                            <?php if ($details['discount'] > 0): ?>
+                                                                <div style="color: #10b981; font-size: 12px; font-weight: 600;"><?php echo $details['discount']; ?>% Skeepy Discount</div>
+                                                            <?php else: ?>
+                                                                <div style="color: #718096; font-size: 12px; font-weight: 600;">No Discount</div>
+                                                            <?php endif; ?>
+                                                        <?php endif; ?>
+                                                    <?php endif; ?>
+                                                </div>
+                                            </div>
+                                            
+                                            <!-- Custom fee input for services without fixed prices -->
+                                            <?php if ($details['has_custom_fee']): ?>
+                                                <div class="custom-fee-input" style="display: none; margin-top: 10px;">
+                                                    <label style="display: block; font-weight: 600; color: #145362; margin-bottom: 5px; font-size: 14px;">Amount (₦)</label>
+                                                    <div style="position: relative;">
+                                                        <span style="position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: #145362; font-weight: 600; font-size: 14px;">₦</span>
+                                                        <input type="number" class="fee-input" name="custom_fees[<?php echo htmlspecialchars($display_name); ?>]" min="0" step="100" style="width: 100%; padding: 10px 10px 10px 25px; border: 2px solid #f9edd7; border-radius: 8px; font-size: 14px; box-sizing: border-box;">
+                                                    </div>
+                                                </div>
+                                            <?php endif; ?>
+                                            
+                                            <!-- Quantity input for time-based services -->
+                                            <?php if ($details['has_quantity']): ?>
+                                                <div class="quantity-input" style="display: none; margin-top: 10px;">
+                                                    <label style="display: block; font-weight: 600; color: #145362; margin-bottom: 5px; font-size: 14px;">Number of <?php echo $details['unit']; ?></label>
+                                                    <input type="number" class="quantity-input-field" name="quantities[<?php echo htmlspecialchars($display_name); ?>]" min="1" max="99" style="width: 100%; padding: 10px; border: 2px solid #f9edd7; border-radius: 8px; font-size: 14px; box-sizing: border-box;">
+                                                </div>
+                                            <?php endif; ?>
+                                        </div>
+                                    <?php endforeach; 
+                                else: ?>
+                                    <div style="padding: 20px; background: #f8f9fa; border-radius: 12px; text-align: center; color: #718096;">
+                                        No services available. Please ensure your clinic has been approved and services have been configured.
+                                    </div>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Financial Information -->
+                    <div class="form-section" style="margin-bottom: 40px;">
+                        <h3 style="color: #145362; font-size: 22px; font-weight: 800; margin: 0 0 25px 0; padding-bottom: 10px; border-bottom: 2px solid #f9edd7;">Financial Details</h3>
+                        
+                        <div style="margin-bottom: 25px;">
+                            <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 10px; font-size: 16px;">Payment Due</label>
+                            <input type="text" id="total_payment_due" name="total_payment_due" readonly style="width: 100%; padding: 16px; border: 2px solid #f9edd7; border-radius: 12px; font-size: 20px; font-weight: 700; color: #145362; background: #f9edd7; box-sizing: border-box;">
+                        </div>
+                        
+                        <div class="payment-summary" style="background: #f9edd7; padding: 20px; border-radius: 12px; margin-top: 20px;">
+                            <h4 style="color: #145362; font-size: 18px; font-weight: 700; margin: 0 0 15px 0;">Claims Payment Summary</h4>
+                            <div id="selected-services-list" style="margin-bottom: 15px;">
+                                <div style="color: #718096; font-style: italic;">No services selected</div>
+                            </div>
+                            <div style="border-top: 2px solid #145362; padding-top: 10px;">
+                                <div style="display: flex; justify-content: space-between; font-size: 18px; font-weight: 700; color: #145362;">
+                                    <span>Total Due:</span>
+                                    <span id="total-amount-display">₦0</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Supporting Documents -->
+                    <div class="form-section" style="margin-bottom: 40px;">
+                        <h3 style="color: #145362; font-size: 22px; font-weight: 800; margin: 0 0 25px 0; padding-bottom: 10px; border-bottom: 2px solid #f9edd7;">Supporting Documents</h3>
+                        
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 25px;">
+                            <div>
+                                <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 10px; font-size: 16px;">Medical Receipt</label>
+                                <div style="border: 3px dashed #f9edd7; border-radius: 16px; padding: 40px; text-align: center; transition: all 0.3s ease; background: #fafafa; cursor: pointer;" onclick="document.getElementById('medical_receipt').click()">
+                                    <div style="color: #145362; font-weight: 700; font-size: 16px; margin-bottom: 8px;">Upload Receipt</div>
+                                    <div style="color: #718096; font-size: 14px;">PDF, JPG, PNG - Max 10MB (Optional)</div>
+                                </div>
+                                <input type="file" id="medical_receipt" name="medical_receipt" accept=".pdf,.jpg,.jpeg,.png" style="display: none;">
+                            </div>
+                            
+                            <div>
+                                <label style="display: block; font-weight: 700; color: #145362; margin-bottom: 10px; font-size: 16px;">Additional Documents</label>
+                                <div style="border: 3px dashed #f9edd7; border-radius: 16px; padding: 40px; text-align: center; transition: all 0.3s ease; background: #fafafa; cursor: pointer;" onclick="document.getElementById('additional_docs').click()">
+                                    <div style="color: #145362; font-weight: 700; font-size: 16px; margin-bottom: 8px;">Upload Documents</div>
+                                    <div style="color: #718096; font-size: 14px;">Medical reports, lab results, etc. (Optional)</div>
+                                </div>
+                                <input type="file" id="additional_docs" name="additional_docs[]" accept=".pdf,.jpg,.jpeg,.png" multiple style="display: none;">
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <input type="hidden" name="action" value="skeepy_submit_claim">
+                    <input type="hidden" name="claim_id" id="hidden_claim_id" value="<?php echo skeepy_generate_claim_id(); ?>">
+                    
+                    <button type="submit" style="background: linear-gradient(135deg, #145362, #2c7a8c); color: #ffffff; padding: 20px 40px; border: none; border-radius: 12px; font-size: 18px; font-weight: 700; cursor: pointer; transition: all 0.3s ease; width: 100%; text-transform: uppercase; letter-spacing: 0.5px;" id="submit-claim">Submit Claim</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    let verifiedHMOData = null;
+    
+    function verifyHMOID() {
+        const hmoInput = document.getElementById('patient_hmo_id');
+        const hmoId = hmoInput.value.trim();
+        const btn = document.getElementById('verify-hmo-btn');
+        const patientDiv = document.getElementById('patient-info-display');
+        const errorDiv = document.getElementById('hmo-error-message');
+        
+        // Hide error message
+        errorDiv.style.display = 'none';
+        
+        if (!hmoId) {
+            errorDiv.textContent = 'Please enter an HMO ID';
+            errorDiv.style.display = 'block';
+            return;
+        }
+        
+        btn.textContent = 'Verifying...';
+        btn.disabled = true;
+        
+        // AJAX call to verify HMO ID from actual database with full SKEEPYHMO- prefix
+        const formData = new FormData();
+        formData.append('action', 'skeepy_verify_patient');
+        formData.append('hmo_id', 'SKEEPYHMO-' + hmoId);
+        formData.append('_wpnonce', document.querySelector('input[name="_wpnonce"]').value);
+        
+        fetch('<?php echo admin_url("admin-ajax.php"); ?>', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            btn.textContent = 'Verify Patient';
+            btn.disabled = false;
+            
+            if (data.success) {
+                verifiedHMOData = data.data;
+                displayPatientInfo(verifiedHMOData);
+                errorDiv.style.display = 'none';
+            } else {
+                errorDiv.style.display = 'block';
+                patientDiv.style.display = 'none';
+                verifiedHMOData = null;
+            }
+        })
+        .catch(error => {
+            btn.textContent = 'Verify Patient';
+            btn.disabled = false;
+            errorDiv.textContent = 'Verification failed. Please try again.';
+            errorDiv.style.display = 'block';
+            console.error('Error:', error);
+        });
+    }
+    
+    function displayPatientInfo(data) {
+        const patientDiv = document.getElementById('patient-info-display');
+        const detailsDiv = document.getElementById('patient-details');
+        
+        // Determine plan status color
+        let statusColor = '#10b981'; // green for active
+        if (data.plan_status && data.plan_status.toLowerCase() === 'pending') {
+            statusColor = '#f59e0b'; // yellow for pending
+        } else if (data.plan_status && data.plan_status.toLowerCase() === 'cancelled') {
+            statusColor = '#dc3545'; // red for cancelled
+        }
+        
+        // Format age to remove .0 decimal
+        const displayAge = data.pet_age ? (parseFloat(data.pet_age) % 1 === 0 ? parseInt(data.pet_age) : data.pet_age) : 'N/A';
+        
+        detailsDiv.innerHTML = `
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; color: #145362;">
+                <div>
+                    <strong>Pet Name:</strong> ${data.pet_name || 'N/A'}<br>
+                    <strong>Pet Type:</strong> ${data.pet_type || 'N/A'}<br>
+                    <strong>Breed:</strong> ${data.pet_breed || 'N/A'}<br>
+                    <strong>Color:</strong> ${data.pet_color || 'N/A'}<br>
+                    <strong>Age:</strong> ${displayAge}<br>
+                    <strong>Gender:</strong> ${data.pet_gender || 'N/A'}
+                </div>
+                <div>
+                    <strong>Plan:</strong> ${data.plan_type || 'N/A'}<br>
+                    <strong>Plan Duration:</strong> ${data.plan_duration || 'N/A'}<br>
+                    <strong>Plan Status:</strong> <span style="color: ${statusColor}; font-weight: 600;">${data.plan_status || 'Active'}</span>
+                </div>
+            </div>
+        `;
+        
+        patientDiv.style.display = 'block';
+    }
+    
+    function closePatientInfo() {
+        document.getElementById('patient-info-display').style.display = 'none';
+        verifiedHMOData = null;
+    }
+    
+    // Success page functions
+    function showSuccessMessage(claimId) {
+        document.getElementById('form-container').style.display = 'none';
+        document.getElementById('success-message').style.display = 'block';
+        document.getElementById('success-claim-id').textContent = 'Claim ID: ' + claimId;
+        window.scrollTo(0, 0);
+    }
+    
+    function submitAnotherClaim() {
+        document.getElementById('success-message').style.display = 'none';
+        document.getElementById('form-container').style.display = 'block';
+        
+        // Reset form
+        document.getElementById('skeepy-claims-form').reset();
+        document.getElementById('patient-info-display').style.display = 'none';
+        verifiedHMOData = null;
+        updatePaymentSummary();
+        
+        // Generate new claim ID
+        const newClaimId = 'SK-' + new Date().toISOString().slice(0, 10).replace(/-/g, '') + '-' + Math.random().toString(36).substr(2, 6).toUpperCase();
+        document.getElementById('claim-id').textContent = newClaimId;
+        document.getElementById('hidden_claim_id').value = newClaimId;
+        
+        window.scrollTo(0, 0);
+    }
+    
+    // Service Selection and Details Toggle
+    function toggleServiceDetails(checkbox) {
+        const serviceItem = checkbox.closest('.service-item');
+        const customFeeInput = serviceItem.querySelector('.custom-fee-input');
+        const quantityInput = serviceItem.querySelector('.quantity-input');
+        
+        if (checkbox.checked) {
+            // Show custom fee input if service has custom fee
+            if (checkbox.getAttribute('data-has-custom-fee') === 'true' && customFeeInput) {
+                customFeeInput.style.display = 'block';
+            }
+            // Show quantity input if service has quantity
+            if (checkbox.getAttribute('data-has-quantity') === 'true' && quantityInput) {
+                quantityInput.style.display = 'block';
+            }
+            serviceItem.style.borderColor = '#145362';
+            serviceItem.style.backgroundColor = '#f8fafc';
+        } else {
+            if (customFeeInput) customFeeInput.style.display = 'none';
+            if (quantityInput) quantityInput.style.display = 'none';
+            serviceItem.style.borderColor = '#f9edd7';
+            serviceItem.style.backgroundColor = '#ffffff';
+        }
+        
+        updatePaymentSummary();
+    }
+    
+    // Update Payment Summary
+    function updatePaymentSummary() {
+        const selectedServices = document.querySelectorAll('.service-checkbox:checked');
+        const servicesList = document.getElementById('selected-services-list');
+        const totalDisplay = document.getElementById('total-amount-display');
+        const totalPaymentDue = document.getElementById('total_payment_due');
+        
+        let totalAmount = 0;
+        let servicesHtml = '';
+        
+        if (selectedServices.length === 0) {
+            servicesList.innerHTML = '<div style="color: #718096; font-style: italic;">No services selected</div>';
+        } else {
+            selectedServices.forEach(function(checkbox) {
+                const serviceName = checkbox.value;
+                const hasCustomFee = checkbox.getAttribute('data-has-custom-fee') === 'true';
+                const hasQuantity = checkbox.getAttribute('data-has-quantity') === 'true';
+                let displayName = serviceName;
+                let finalFee = 0;
+                
+                if (hasCustomFee) {
+                    const feeInput = checkbox.closest('.service-item').querySelector('.fee-input');
+                    if (feeInput && feeInput.value) {
+                        finalFee = parseFloat(feeInput.value) || 0;
+                        
+                        if (hasQuantity) {
+                            const quantityInput = checkbox.closest('.service-item').querySelector('.quantity-input-field');
+                            const quantity = parseInt(quantityInput.value) || 1;
+                            finalFee *= quantity;
+                            
+                            // Add quantity display for pet sitting and boarding
+                            if (serviceName.toLowerCase().includes('pet sitting')) {
+                                displayName = serviceName + ' - ' + quantity + ' hours';
+                            } else if (serviceName.toLowerCase().includes('pet boarding')) {
+                                displayName = serviceName + ' - ' + quantity + ' days';
+                            }
+                        }
+                    }
+                } else {
+                    const originalFee = parseFloat(checkbox.getAttribute('data-fee'));
+                    const discount = parseFloat(checkbox.getAttribute('data-discount')) || 0;
+                    finalFee = originalFee * (1 - discount / 100);
+                    
+                    if (hasQuantity) {
+                        const quantityInput = checkbox.closest('.service-item').querySelector('.quantity-input-field');
+                        if (quantityInput && quantityInput.value) {
+                            const quantity = parseInt(quantityInput.value) || 1;
+                            finalFee *= quantity;
+                            
+                            // Add quantity display for pet sitting and boarding
+                            if (serviceName.toLowerCase().includes('pet sitting')) {
+                                displayName = serviceName + ' - ' + quantity + ' hours';
+                            } else if (serviceName.toLowerCase().includes('pet boarding')) {
+                                displayName = serviceName + ' - ' + quantity + ' days';
+                            }
+                        }
+                    }
+                }
+                
+                if (finalFee > 0) {
+                    totalAmount += finalFee;
+                    servicesHtml += `
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 8px; color: #145362;">
+                            <span>${displayName}</span>
+                            <span>₦${finalFee.toLocaleString()}</span>
+                        </div>
+                    `;
+                }
+            });
+            
+            servicesList.innerHTML = servicesHtml;
+        }
+        
+        totalDisplay.textContent = '₦' + totalAmount.toLocaleString();
+        totalPaymentDue.value = '₦' + totalAmount.toLocaleString();
+    }
+    
+    // Add event listeners for custom fee and quantity inputs
+    document.addEventListener('change', function(e) {
+        if (e.target.classList.contains('fee-input') || e.target.classList.contains('quantity-input-field')) {
+            updatePaymentSummary();
+        }
+    });
+    
+    // Limit quantity inputs to 2 characters and patient HMO ID to 6 characters
+    document.addEventListener('input', function(e) {
+        if (e.target.classList.contains('quantity-input-field')) {
+            let value = e.target.value;
+            if (value.length > 2) {
+                e.target.value = value.slice(0, 2);
+            }
+            if (parseInt(value) > 99) {
+                e.target.value = '99';
+            }
+        }
+        
+        if (e.target.id === 'patient_hmo_id') {
+            let value = e.target.value.toUpperCase();
+            if (value.length > 6) {
+                e.target.value = value.slice(0, 6);
+            }
+        }
+    });
+    
+    // Enter key on HMO ID field triggers verification
+    document.getElementById('patient_hmo_id').addEventListener('keypress', function(e) {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            verifyHMOID();
+        }
+    });
+    
+    // Form submission with AJAX - FINAL FIX
+    document.getElementById('skeepy-claims-form').addEventListener('submit', function(e) {
+        e.preventDefault();
+        
+        if (!verifiedHMOData) {
+            const errorDiv = document.getElementById('hmo-error-message');
+            errorDiv.textContent = 'Please verify the Pet HMO ID before submitting the claim.';
+            errorDiv.style.display = 'block';
+            document.getElementById('patient_hmo_id').focus();
+            return false;
+        }
+        
+        const selectedServices = document.querySelectorAll('.service-checkbox:checked');
+        if (selectedServices.length === 0) {
+            alert('Please select at least one service');
+            return false;
+        }
+        
+        // Check custom fees
+        let missingCustomFees = false;
+        selectedServices.forEach(function(checkbox) {
+            const hasCustomFee = checkbox.getAttribute('data-has-custom-fee') === 'true';
+            if (hasCustomFee) {
+                const feeInput = checkbox.closest('.service-item').querySelector('.fee-input');
+                if (!feeInput.value || parseFloat(feeInput.value) <= 0) {
+                    missingCustomFees = true;
+                }
+            }
+        });
+        
+        if (missingCustomFees) {
+            alert('Please enter fees for all selected services that require custom pricing');
+            return false;
+        }
+        
+        // Update submit button
+        const submitBtn = document.getElementById('submit-claim');
+        const originalText = submitBtn.textContent;
+        submitBtn.textContent = 'Submitting...';
+        submitBtn.disabled = true;
+        
+        // Prepare form data
+        const formData = new FormData(this);
+        const hmoInput = document.getElementById('patient_hmo_id');
+        formData.append('full_hmo_id', 'SKEEPYHMO-' + hmoInput.value);
+        
+        // Submit via fetch
+        fetch('<?php echo admin_url("admin-ajax.php"); ?>', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            submitBtn.textContent = originalText;
+            submitBtn.disabled = false;
+            
+            if (data.success) {
+                const message = data.data;
+                const claimIdMatch = message.match(/Reference: (SK-[A-Z0-9-]+)/);
+                const claimId = claimIdMatch ? claimIdMatch[1] : 'Unknown';
+                showSuccessMessage(claimId);
+            } else {
+                alert('Error: ' + data.data);
+            }
+        })
+        .catch(error => {
+            submitBtn.textContent = originalText;
+            submitBtn.disabled = false;
+            console.error('Error:', error);
+            alert('An error occurred while submitting the claim. Please try again.');
+        });
+    });
+    
+    // File Upload Feedback
+    document.getElementById('medical_receipt').addEventListener('change', function() {
+        const fileName = this.files[0]?.name;
+        if (fileName) {
+            this.previousElementSibling.querySelector('div').textContent = fileName;
+        }
+    });
+    
+    document.getElementById('additional_docs').addEventListener('change', function() {
+        const fileCount = this.files.length;
+        if (fileCount > 0) {
+            this.previousElementSibling.querySelector('div').textContent = `${fileCount} file(s) selected`;
+        }
+    });
+    
+    // Input Styling
+    document.addEventListener('DOMContentLoaded', function() {
+        const inputs = document.querySelectorAll('input:not([readonly]), textarea');
+        inputs.forEach(function(input) {
+            input.addEventListener('focus', function() {
+                this.style.borderColor = '#145362';
+                this.style.boxShadow = '0 0 0 3px rgba(20, 83, 98, 0.1)';
+            });
+            
+            input.addEventListener('blur', function() {
+                this.style.borderColor = '#f9edd7';
+                this.style.boxShadow = 'none';
+            });
+        });
+    });
+    </script>
+    
+    <style>
+    @media (max-width: 768px) {
+        .skeepy-claims-form div[style*="grid-template-columns"] {
+            display: block !important;
+        }
+        .skeepy-claims-form div[style*="grid-template-columns"] > div {
+            margin-bottom: 20px;
+        }
+        .claims-container {
+            padding: 30px 20px !important;
+        }
+    }
+    
+    .service-item:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 25px rgba(20, 83, 98, 0.1);
+    }
+    
+    .service-checkbox:checked + span {
+        color: #145362 !important;
+        font-weight: 700 !important;
+    }
+    
+    /* Smooth animations */
+    .patient-info-display {
+        animation: slideDown 0.3s ease-out;
+    }
+    
+    @keyframes slideDown {
+        from {
+            opacity: 0;
+            transform: translateY(-20px);
+        }
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+    </style>
+    
+    <?php
+    return ob_get_clean();
+}
+
+// Register the shortcode
+add_shortcode('skeepy_claims_form', 'skeepy_claims_form_shortcode');
+
+// AJAX handler for patient verification
+add_action('wp_ajax_skeepy_verify_patient', 'skeepy_handle_patient_verification');
+add_action('wp_ajax_nopriv_skeepy_verify_patient', 'skeepy_handle_patient_verification');
+
+function skeepy_handle_patient_verification() {
+    // Verify nonce for security
+    if (!wp_verify_nonce($_POST['_wpnonce'], 'skeepy_claims_nonce')) {
+        wp_send_json_error('Security check failed');
+        return;
+    }
+    
+    $hmo_id = sanitize_text_field($_POST['hmo_id']);
+    
+    if (empty($hmo_id)) {
+        wp_send_json_error('HMO ID is required');
+        return;
+    }
+    
+    global $wpdb;
+    $pets_table = $wpdb->prefix . 'skeepy_pets';
+    
+    // Query pet data by HMO ID
+    $pet_data = $wpdb->get_row($wpdb->prepare(
+        "SELECT * FROM $pets_table WHERE hmo_id = %s",
+        $hmo_id
+    ));
+    
+    if ($pet_data) {
+        wp_send_json_success([
+            'pet_name' => $pet_data->pet_name,
+            'pet_type' => $pet_data->pet_type,
+            'pet_breed' => $pet_data->pet_breed,
+            'pet_color' => $pet_data->pet_color,
+            'pet_gender' => $pet_data->pet_gender,
+            'pet_age' => $pet_data->pet_age,
+            'plan_type' => $pet_data->plan_type,
+            'plan_duration' => $pet_data->plan_duration,
+            'plan_status' => $pet_data->plan_status ?: 'Active'
+        ]);
+    } else {
+        wp_send_json_error('Pet not found with the provided HMO ID');
+    }
+}
+
+// AJAX handler for claim submission - COMPLETELY REWRITTEN WITH WORKING DATABASE INSERT
+add_action('wp_ajax_skeepy_submit_claim', 'skeepy_handle_claim_submission');
+add_action('wp_ajax_nopriv_skeepy_submit_claim', 'skeepy_handle_claim_submission');
+
+function skeepy_handle_claim_submission() {
+    error_log("=== CLAIM SUBMISSION STARTED ===");
+    
+    // Basic validation
+    if (!wp_verify_nonce($_POST['_wpnonce'], 'skeepy_claims_nonce')) {
+        error_log("Nonce failed");
+        wp_send_json_error('Security check failed');
+        return;
+    }
+    
+    if (!is_user_logged_in()) {
+        error_log("User not logged in");
+        wp_send_json_error('You must be logged in to submit claims');
+        return;
+    }
+    
+    $current_user = wp_get_current_user();
+    if (!in_array('skeepy_clinic', $current_user->roles)) {
+        error_log("Not clinic user");
+        wp_send_json_error('Access denied. Only clinic partners can submit claims');
+        return;
+    }
+    
+    // Recreate table to ensure clean structure
+    skeepy_create_claims_table();
+    
+    global $wpdb;
+    $claims_table = $wpdb->prefix . 'skeepy_claims';
+    $clinics_table = $wpdb->prefix . 'skeepy_clinics';
+    $pets_table = $wpdb->prefix . 'skeepy_pets';
+    
+    // Get clinic data
+    $clinic_data = $wpdb->get_row($wpdb->prepare(
+        "SELECT * FROM $clinics_table WHERE clinic_email = %s",
+        $current_user->user_email
+    ));
+    
+    if (!$clinic_data) {
+        error_log("No clinic data found");
+        wp_send_json_error('Clinic information not found');
+        return;
+    }
+    
+    // Get pet data
+    $full_hmo_id = $_POST['full_hmo_id'] ?? '';
+    if (empty($full_hmo_id)) {
+        error_log("Missing HMO ID");
+        wp_send_json_error('Pet HMO ID is required');
+        return;
+    }
+    
+    $pet_data = $wpdb->get_row($wpdb->prepare(
+        "SELECT * FROM $pets_table WHERE hmo_id = %s",
+        $full_hmo_id
+    ));
+    
+    if (!$pet_data) {
+        error_log("No pet data found");
+        wp_send_json_error('Pet information not found');
+        return;
+    }
+    
+    // Simple data preparation - NO COMPLEX SANITIZATION
+    $claim_id = $_POST['claim_id'] ?? skeepy_generate_claim_id();
+    
+    // Insert minimal data to prevent database errors
+    $result = $wpdb->query($wpdb->prepare("
+        INSERT INTO $claims_table 
+        (claim_id, patient_hmo_id, clinic_name, provider_id, veterinarian_name, treatment_date, submission_date, symptoms, diagnosis, treatment, services, custom_fees, quantities, total_amount, status, submitted_by) 
+        VALUES 
+        (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %d)",
+        $claim_id,
+        $full_hmo_id,
+        $clinic_data->clinic_name ?? '',
+        $clinic_data->provider_id ?? '',
+        $_POST['veterinarian_name'] ?? '',
+        $_POST['treatment_date'] ?? date('Y-m-d'),
+        current_time('mysql'),
+        $_POST['symptoms'] ?? '',
+        $_POST['diagnosis'] ?? '',
+        $_POST['treatment'] ?? '',
+        json_encode($_POST['services'] ?? []),
+        json_encode($_POST['custom_fees'] ?? []),
+        json_encode($_POST['quantities'] ?? []),
+        $_POST['total_payment_due'] ?? '₦0',
+        'pending',
+        $current_user->ID
+    ));
+    
+    if ($result === false) {
+        error_log("Database insert failed: " . $wpdb->last_error);
+        error_log("Last query: " . $wpdb->last_query);
+        wp_send_json_error('Database error: Unable to save claim. Please try again.');
+        return;
+    }
+    
+    error_log("Database insert successful");
+    
+    // Send emails with proper format - MATCHING PET SIGNUP EMAIL STYLE
+    $clinic_email = $clinic_data->clinic_email ?: $current_user->user_email;
+    $clinic_rep_name = $current_user->display_name ?: $current_user->user_nicename ?: 'Clinic Representative';
+    
+    $services_list = !empty($_POST['services']) ? implode(', ', $_POST['services']) : 'None specified';
+    
+    error_log("Attempting to send clinic email to: " . $clinic_email);
+    
+    $headers = array('Content-Type: text/html; charset=UTF-8');
+    
+    // Clinic email with professional HTML format matching pet signup style
+    $clinic_subject = "Claim " . $claim_id . " Submitted";
+    $clinic_message = '
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Claim Submitted - Skeepy</title>
+        <style>
+            body {
+                font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+                line-height: 1.6;
+                color: #333;
+                margin: 0;
+                padding: 0;
+                background-color: #f8f9fa;
+            }
+            .email-container {
+                max-width: 600px;
+                margin: 0 auto;
+                background-color: #ffffff;
+                border-radius: 12px;
+                overflow: hidden;
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            }
+            .header {
+                background: linear-gradient(135deg, #145362, #2c7a8c);
+                color: #f9edd7;
+                padding: 30px;
+                text-align: center;
+            }
+            .header h1 {
+                margin: 0;
+                font-size: 28px;
+                font-weight: 700;
+                color: #f9edd7;
+            }
+            .content {
+                padding: 40px 30px;
+            }
+            .greeting {
+                font-size: 18px;
+                margin-bottom: 20px;
+                color: #145362;
+            }
+            .claim-details {
+                background: linear-gradient(135deg, #f8fcfd, #e8f4f6);
+                border-left: 4px solid #145362;
+                padding: 20px;
+                margin: 25px 0;
+                border-radius: 8px;
+            }
+            .claim-details h3 {
+                margin: 0 0 15px 0;
+                color: #145362;
+                font-size: 18px;
+            }
+            .details-grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 10px;
+                margin-bottom: 15px;
+            }
+            .detail-item {
+                padding: 8px 0;
+            }
+            .detail-label {
+                font-weight: 600;
+                color: #145362;
+            }
+            .footer {
+                background-color: #f8f9fa;
+                padding: 25px 30px;
+                text-align: center;
+                border-top: 1px solid #e0e0e0;
+            }
+            .footer p {
+                margin: 0;
+                color: #666;
+                font-size: 16px;
+            }
+            .unsubscribe {
+                background-color: #f8f9fa;
+                padding: 20px 30px;
+                text-align: center;
+                border-top: 1px solid #e0e0e0;
+                font-size: 12px;
+                color: #666;
+                line-height: 1.5;
+            }
+            .unsubscribe p {
+                margin: 0 0 10px 0;
+            }
+            .unsubscribe a {
+                color: #145362;
+                text-decoration: none;
+            }
+            .bold { font-weight: 700; }
+            @media (max-width: 600px) {
+                .details-grid {
+                    grid-template-columns: 1fr;
+                }
+                .content {
+                    padding: 30px 20px;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="email-container">
+            <div class="header">
+                <h1>Claim Submitted Successfully!</h1>
+            </div>
+            
+            <div class="content">
+                <div class="greeting">
+                    <strong>Dear ' . $clinic_rep_name . ',</strong>
+                </div>
+                
+                <p>Your claim with the claim ID: <span class="bold">' . $claim_id . '</span> from your clinic, <span class="bold">' . $clinic_data->clinic_name . '</span> has been submitted.</p>
+                
+                <div class="claim-details">
+                    <h3>Claim Details:</h3>
+                    <div class="details-grid">
+                        <div class="detail-item">
+                            <div class="detail-label">Pet Name:</div>
+                            <div class="bold">' . $pet_data->pet_name . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Pet Type:</div>
+                            <div class="bold">' . $pet_data->pet_type . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Pet Breed:</div>
+                            <div class="bold">' . $pet_data->pet_breed . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Pet Gender:</div>
+                            <div class="bold">' . $pet_data->pet_gender . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Pet HMO ID:</div>
+                            <div class="bold">' . $full_hmo_id . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Attended to By:</div>
+                            <div class="bold">' . $_POST['veterinarian_name'] . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Treatment Date:</div>
+                            <div class="bold">' . date('F j, Y', strtotime($_POST['treatment_date'])) . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Claims Submission Date:</div>
+                            <div class="bold">' . date('F j, Y', strtotime(current_time('mysql'))) . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Symptoms:</div>
+                            <div class="bold">' . $_POST['symptoms'] . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Diagnosis:</div>
+                            <div class="bold">' . $_POST['diagnosis'] . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Treatment:</div>
+                            <div class="bold">' . $_POST['treatment'] . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Services Provided:</div>
+                            <div class="bold">' . $services_list . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Claim Payment Due:</div>
+                            <div class="bold">' . $_POST['total_payment_due'] . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Expected Claims Payment Date:</div>
+                            <div class="bold">' . date('F j, Y', strtotime(current_time('mysql') . ' +7 days')) . '</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <p><strong>What\'s Next?</strong><br>
+                Our team will review your claim and process the reimbursement according to the agreed terms. You will receive updates on the claim status via email.</p>
+                
+                <p>Thank you for being a valued Skeepy partner clinic!</p>
+            </div>
+            
+            <div class="footer">
+                <p>With ❤️ from<br><strong>The Skeepy Team</strong></p>
+            </div>
+            
+            <div class="unsubscribe">
+                <p>You\'re getting this email because you submitted a claim through the Skeepy HMO system. We respect your privacy and will only send you important updates about your claims.</p>
+                <p>To unsubscribe from future emails, reply to this email with "UNSUBSCRIBE" in the subject line.</p>
+                <p>©️2025 Skeepy Pet Solutions Limited. | Lagos, Nigeria | help@skeepy.co</p>
+            </div>
+        </div>
+    </body>
+    </html>';
+    
+    // Admin email with professional HTML format matching pet signup style
+    $admin_subject = "Claim " . $claim_id . " Submitted";
+    $admin_message = '
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>New Claim Alert - Skeepy</title>
+        <style>
+            body {
+                font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+                line-height: 1.6;
+                color: #333;
+                margin: 0;
+                padding: 0;
+                background-color: #f8f9fa;
+            }
+            .email-container {
+                max-width: 600px;
+                margin: 0 auto;
+                background-color: #ffffff;
+                border-radius: 12px;
+                overflow: hidden;
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            }
+            .header {
+                background: linear-gradient(135deg, #145362, #2c7a8c);
+                color: #f9edd7;
+                padding: 30px;
+                text-align: center;
+            }
+            .header h1 {
+                margin: 0;
+                font-size: 28px;
+                font-weight: 700;
+                color: #f9edd7;
+            }
+            .content {
+                padding: 40px 30px;
+            }
+            .greeting {
+                font-size: 18px;
+                margin-bottom: 20px;
+                color: #145362;
+            }
+            .claim-details {
+                background: linear-gradient(135deg, #f8fcfd, #e8f4f6);
+                border-left: 4px solid #145362;
+                padding: 20px;
+                margin: 25px 0;
+                border-radius: 8px;
+            }
+            .claim-details h3 {
+                margin: 0 0 15px 0;
+                color: #145362;
+                font-size: 18px;
+            }
+            .details-grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 10px;
+                margin-bottom: 15px;
+            }
+            .detail-item {
+                padding: 8px 0;
+            }
+            .detail-label {
+                font-weight: 600;
+                color: #145362;
+            }
+            .urgent-box {
+                background: #fff5f5;
+                border: 2px solid #dc3545;
+                border-radius: 8px;
+                padding: 20px;
+                margin: 25px 0;
+            }
+            .urgent-box h3 {
+                margin: 0 0 15px 0;
+                color: #dc3545;
+                font-size: 18px;
+                font-weight: 700;
+            }
+            .footer {
+                background-color: #f8f9fa;
+                padding: 25px 30px;
+                text-align: center;
+                border-top: 1px solid #e0e0e0;
+            }
+            .footer p {
+                margin: 0;
+                color: #666;
+                font-size: 16px;
+            }
+            .bold { font-weight: 700; }
+            @media (max-width: 600px) {
+                .details-grid {
+                    grid-template-columns: 1fr;
+                }
+                .content {
+                    padding: 30px 20px;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="email-container">
+            <div class="header">
+                <h1>New Claim Submitted</h1>
+            </div>
+            
+            <div class="content">
+                <div class="greeting">
+                    <strong>Dear Skeepy Admin Team,</strong>
+                </div>
+                
+                <p>A claim with the claim ID: <span class="bold">' . $claim_id . '</span> from clinic, <span class="bold">' . $clinic_data->clinic_name . '</span> has been submitted.</p>
+                
+                <div class="claim-details">
+                    <h3>Claim Details:</h3>
+                    <div class="details-grid">
+                        <div class="detail-item">
+                            <div class="detail-label">Pet Name:</div>
+                            <div class="bold">' . $pet_data->pet_name . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Pet Type:</div>
+                            <div class="bold">' . $pet_data->pet_type . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Pet Breed:</div>
+                            <div class="bold">' . $pet_data->pet_breed . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Pet Gender:</div>
+                            <div class="bold">' . $pet_data->pet_gender . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Pet HMO ID:</div>
+                            <div class="bold">' . $full_hmo_id . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Attended to By:</div>
+                            <div class="bold">' . $_POST['veterinarian_name'] . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Treatment Date:</div>
+                            <div class="bold">' . date('F j, Y', strtotime($_POST['treatment_date'])) . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Claims Submission Date:</div>
+                            <div class="bold">' . date('F j, Y', strtotime(current_time('mysql'))) . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Symptoms:</div>
+                            <div class="bold">' . $_POST['symptoms'] . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Diagnosis:</div>
+                            <div class="bold">' . $_POST['diagnosis'] . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Treatment:</div>
+                            <div class="bold">' . $_POST['treatment'] . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Services Provided:</div>
+                            <div class="bold">' . $services_list . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Claim Amount Submitted:</div>
+                            <div class="bold">' . $_POST['total_payment_due'] . '</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Expected Claims Payment Date:</div>
+                            <div class="bold">' . date('F j, Y', strtotime(current_time('mysql') . ' +7 days')) . '</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="urgent-box">
+                    <h3>Action Required</h3>
+                    <p>Please review this claim in the admin dashboard and process the reimbursement according to our standard procedures. The clinic is expecting timely processing of this request.</p>
+                </div>
+                
+                <p><strong>Next Steps:</strong><br>
+                1. Login to the admin dashboard<br>
+                2. Review claim details and supporting documents<br>
+                3. Approve or request additional information<br>
+                4. Process reimbursement payment</p>
+            </div>
+            
+            <div class="footer">
+                <p>With ❤️ from<br><strong>The Skeepy Team</strong></p>
+            </div>
+            
+            <div class="unsubscribe">
+                <p>You are getting this email because a claim was submitted through the Skeepy HMO system. We respect your privacy and will only send you important updates about claims.</p>
+                <p>To unsubscribe from future emails, reply to this email with "UNSUBSCRIBE" in the subject line.</p>
+                <p>©2025 Skeepy Pet Solutions Limited. | Lagos, Nigeria | help@skeepy.co</p>
+            </div>
+        </div>
+    </body>
+    </html>';
+    
+    // Force send emails with additional debugging
+    error_log("Clinic email data - Email: " . $clinic_email . ", Name: " . $clinic_rep_name);
+    
+    $clinic_sent = wp_mail($clinic_email, $clinic_subject, $clinic_message, $headers);
+    $admin_sent = wp_mail('info@skeepy.co', $admin_subject, $admin_message, $headers);
+    
+    if (!$clinic_sent) {
+        error_log("Clinic email failed - attempting fallback");
+        $clinic_sent = wp_mail($current_user->user_email, $clinic_subject, $clinic_message, $headers);
+    }
+    
+    error_log("Final email status - Clinic: " . ($clinic_sent ? 'sent' : 'failed') . " to " . $clinic_email . ", Admin: " . ($admin_sent ? 'sent' : 'failed'));
+    
+    wp_send_json_success('Claim submitted successfully. Reference: ' . $claim_id . '. Confirmation email has been sent.');
+}

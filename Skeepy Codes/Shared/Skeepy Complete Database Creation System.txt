@@ -1,0 +1,116 @@
+/**
+ * WPCode Snippet 1: Database Creation (Tested - No 403 Errors)
+ * Creates all required tables for Skeepy Pet HMO system
+ */
+
+function skeepy_create_database_tables() {
+    global $wpdb;
+    
+    $charset_collate = $wpdb->get_charset_collate();
+    
+    // Pets table
+    $pets_table = $wpdb->prefix . 'skeepy_pets';
+    $pets_sql = "CREATE TABLE IF NOT EXISTS $pets_table (
+        id int(11) NOT NULL AUTO_INCREMENT,
+        hmo_id varchar(20) NOT NULL UNIQUE,
+        pet_name varchar(100) NOT NULL,
+        pet_type varchar(50) NOT NULL,
+        pet_breed varchar(100) NOT NULL,
+        pet_age decimal(3,1) NOT NULL,
+        pet_gender varchar(20) NOT NULL,
+        pet_weight decimal(5,2) DEFAULT NULL,
+        pet_color varchar(100) DEFAULT NULL,
+        profile_picture varchar(255) DEFAULT NULL,
+        guardian_first_name varchar(100) NOT NULL,
+        guardian_surname varchar(100) NOT NULL,
+        guardian_email varchar(100) NOT NULL,
+        guardian_phone varchar(20) NOT NULL,
+        guardian_address text NOT NULL,
+        guardian_state varchar(50) NOT NULL,
+        emergency_contact varchar(20) DEFAULT NULL,
+        plan_type varchar(50) NOT NULL,
+        plan_duration varchar(20) NOT NULL,
+        coverage_limit decimal(10,2) NOT NULL,
+        monthly_fee decimal(10,2) NOT NULL,
+        plan_status varchar(20) DEFAULT 'pending',
+        registration_date datetime DEFAULT CURRENT_TIMESTAMP,
+        created_at datetime DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id)
+    ) $charset_collate;";
+    
+    // Clinics table
+    $clinics_table = $wpdb->prefix . 'skeepy_clinics';
+    $clinics_sql = "CREATE TABLE IF NOT EXISTS $clinics_table (
+        id int(11) NOT NULL AUTO_INCREMENT,
+        provider_id varchar(30) NOT NULL UNIQUE,
+        rep_first_name varchar(100) NOT NULL,
+        rep_last_name varchar(100) NOT NULL,
+        job_title varchar(100) NOT NULL,
+        clinic_name varchar(200) NOT NULL,
+        clinic_email varchar(100) NOT NULL,
+        clinic_phone varchar(20) NOT NULL,
+        clinic_address text NOT NULL,
+        vcn_number varchar(50) NOT NULL,
+        profile_picture varchar(255) DEFAULT NULL,
+        pets_served varchar(100) NOT NULL,
+        services_offered longtext NOT NULL,
+        application_status varchar(20) DEFAULT 'pending',
+        application_date datetime DEFAULT CURRENT_TIMESTAMP,
+        review_date datetime DEFAULT NULL,
+        reviewed_by int(11) DEFAULT NULL,
+        admin_notes text DEFAULT NULL,
+        created_at datetime DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id)
+    ) $charset_collate;";
+    
+    // Claims table
+    $claims_table = $wpdb->prefix . 'skeepy_claims';
+    $claims_sql = "CREATE TABLE IF NOT EXISTS $claims_table (
+        id int(11) NOT NULL AUTO_INCREMENT,
+        claim_id varchar(50) NOT NULL UNIQUE,
+        hmo_id varchar(20) NOT NULL,
+        pet_id int(11) NOT NULL,
+        clinic_name varchar(200) NOT NULL,
+        provider_id varchar(30) DEFAULT NULL,
+        veterinarian_name varchar(100) NOT NULL,
+        treatment_date date NOT NULL,
+        diagnosis text NOT NULL,
+        treatment_description text NOT NULL,
+        services_provided text NOT NULL,
+        total_amount decimal(10,2) NOT NULL,
+        estimated_reimbursement decimal(10,2) NOT NULL,
+        payment_method varchar(50) NOT NULL,
+        receipt_files text DEFAULT NULL,
+        medical_record_files text DEFAULT NULL,
+        additional_notes text DEFAULT NULL,
+        claim_status varchar(20) DEFAULT 'pending',
+        submission_date datetime DEFAULT CURRENT_TIMESTAMP,
+        processed_date datetime DEFAULT NULL,
+        processed_by int(11) DEFAULT NULL,
+        admin_notes text DEFAULT NULL,
+        guardian_first_name varchar(100) NOT NULL,
+        guardian_surname varchar(100) NOT NULL,
+        guardian_email varchar(100) NOT NULL,
+        guardian_phone varchar(20) NOT NULL,
+        PRIMARY KEY (id)
+    ) $charset_collate;";
+    
+    // Execute table creation
+    $wpdb->query($pets_sql);
+    $wpdb->query($clinics_sql);
+    $wpdb->query($claims_sql);
+    
+    return true;
+}
+
+// Safe initialization
+function skeepy_init_database() {
+    static $initialized = false;
+    
+    if (!$initialized) {
+        skeepy_create_database_tables();
+        $initialized = true;
+    }
+}
+
+add_action('init', 'skeepy_init_database');

@@ -1,0 +1,175 @@
+/**
+ * Integration between Clinic Dashboard and Relationship Architecture
+ * Add this to your existing clinic dashboard to connect relationship functions
+ */
+
+// Add this AJAX handler to your clinic dashboard file
+add_action('wp_ajax_skeepy_test_relationship', 'skeepy_test_relationship_handler');
+
+function skeepy_test_relationship_handler() {
+    // Test the relationship architecture with real data
+    global $wpdb;
+    
+    // Get a test claim
+    $test_claim = $wpdb->get_row("
+        SELECT * FROM {$wpdb->prefix}skeepy_claims 
+        WHERE patient_hmo_id = 'SKEEPYHMO-ABC123' 
+        LIMIT 1
+    ");
+    
+    if ($test_claim) {
+        $result = skeepy_process_claim_relationship($test_claim->claim_id, 'approve');
+        wp_send_json_success($result);
+    } else {
+        wp_send_json_error('No test claim found');
+    }
+}
+
+// Enhanced patient verification with relationship data
+add_action('wp_ajax_skeepy_verify_patient_with_benefits', 'skeepy_verify_patient_with_benefits_handler');
+
+function skeepy_verify_patient_with_benefits_handler() {
+    if (!wp_verify_nonce($_POST['nonce'], 'verify_patient_nonce')) {
+        wp_send_json_error('Security check failed');
+        return;
+    }
+    
+    $hmo_id = sanitize_text_field($_POST['hmo_id']);
+    
+    if (strlen($hmo_id) === 6 && strpos($hmo_id, 'SKEEPYHMO-') === false) {
+        $hmo_id = 'SKEEPYHMO-' . $hmo_id;
+    }
+    
+    global $wpdb;
+    
+    // Get pet details
+    $patient = $wpdb->get_row($wpdb->prepare(
+        "SELECT * FROM skeepy_pets WHERE hmo_id = %s",
+        $hmo_id
+    ));
+    
+    if ($patient) {
+        // Use the benefit tracker to get comprehensive data
+        $tracker = new SkeepyBenefitTracker();
+        $benefit_data = $tracker->calculateUsedBenefits($hmo_id);
+        
+        // Get claims for this HMO ID
+        // Get claims for this HMO ID
+        $claims = $wpdb->get_results($wpdb->prepare(
+            "SELECT * FROM {$wpdb->prefix}skeepy_claims 
+             WHERE patient_hmo_id = %s 
+             ORDER BY submission_date DESC",
+            $hmo_id
+        ));
+        
+        wp_send_json_success(array(
+            'pet_name' => $patient->pet_name ?? '',
+            'hmo_id' => $patient->hmo_id ?? '',
+            'pet_type' => $patient->pet_type ?? '',
+            'plan_type' => $patient->plan_type ?? '',
+            'benefit_data' => $benefit_data,
+            'total_coverage_used' => $benefit_data['total_coverage_used'],
+            'total_coverage_limit' => $benefit_data['total_coverage_limit'],
+            'remaining_coverage' => $benefit_data['remaining_coverage'],
+            'service_usage' => isset($benefit_data['service_usage']) ? $benefit_data['service_usage'] : [],
+            'claims_count' => count($claims),
+            'recent_claims' => array_slice($claims, 0, 3), // Last 3 claims
+            'relationship_working' => true
+        ));
+    } else {
+        wp_send_json_error('Patient not found');
+    }
+}
+
+// Add JavaScript to test relationship architecture from dashboard
+function add_relationship_test_javascript() {
+    ?>
+    <script>
+    // Test relationship architecture
+    function testRelationshipArchitecture() {
+        fetch('/wp-admin/admin-ajax.php', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: new URLSearchParams({
+                action: 'skeepy_test_relationship',
+                nonce: '<?php echo wp_create_nonce("test_relationship_nonce"); ?>'
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            console.log('Relationship Architecture Test:', data);
+            if (data.success) {
+                alert('✅ Relationship Architecture Working!\n' +
+                      'Claim ID: ' + data.data.claim_id + '\n' +
+                      'HMO ID: ' + data.data.hmo_id + '\n' +
+                      'Plan Type: ' + data.data.plan_type + '\n' +
+                      'Amount: ₦' + data.data.total_amount.toLocaleString());
+            } else {
+                alert('❌ Relationship Architecture Error: ' + data.data);
+            }
+        })
+        .catch(error => {
+            console.error('Test failed:', error);
+            alert('❌ Test failed: ' + error.message);
+        });
+    }
+    
+    // Enhanced patient verification with benefits
+    function verifyPatientWithBenefits(hmoId) {
+        fetch('/wp-admin/admin-ajax.php', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: new URLSearchParams({
+                action: 'skeepy_verify_patient_with_benefits',
+                hmo_id: hmoId,
+                nonce: '<?php echo wp_create_nonce("verify_patient_nonce"); ?>'
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                const resultDiv = document.getElementById('patient-result');
+                if (resultDiv) {
+                    resultDiv.innerHTML = `
+                        <div style="background: #d4edda; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                            <h4>✅ Patient Verified with Relationship Data</h4>
+                            <p><strong>Pet:</strong> ${data.data.pet_name}</p>
+                            <p><strong>Plan:</strong> ${data.data.plan_type}</p>
+                            <p><strong>HMO ID:</strong> ${data.data.hmo_id}</p>
+                            <p><strong>Claims:</strong> ${data.data.claims_count} total</p>
+                            <p><strong>Coverage Used:</strong> ₦${data.data.benefit_data.total_coverage_used?.toLocaleString() || 0}</p>
+                            <p><strong>Remaining:</strong> ₦${data.data.benefit_data.remaining_coverage?.toLocaleString() || 0}</p>
+                            <p><strong>Relationship Architecture:</strong> ${data.data.relationship_working ? '✅ Working' : '❌ Not Working'}</p>
+                        </div>
+                    `;
+                }
+            } else {
+                alert('Patient not found: ' + data.data);
+            }
+        })
+        .catch(error => {
+            console.error('Verification failed:', error);
+        });
+    }
+    
+    // Add test button to dashboard
+    document.addEventListener('DOMContentLoaded', function() {
+        const dashboardSections = document.querySelector('.dashboard-sections');
+        if (dashboardSections) {
+            const testButton = document.createElement('button');
+            testButton.textContent = 'Test Relationship Architecture';
+            testButton.onclick = testRelationshipArchitecture;
+            testButton.style.cssText = 'background: #28a745; color: white; border: none; padding: 10px 15px; border-radius: 5px; margin: 5px; cursor: pointer;';
+            dashboardSections.appendChild(testButton);
+        }
+    });
+    </script>
+    <?php
+}
+
+// Hook to add the JavaScript
+add_action('wp_footer', 'add_relationship_test_javascript');

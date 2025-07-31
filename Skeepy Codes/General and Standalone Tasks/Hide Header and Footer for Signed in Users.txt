@@ -1,0 +1,17 @@
+add_action('wp', function () {
+    // Only hide header/footer for logged-in users and exclude specific pages
+    if (is_user_logged_in() && !current_user_can('administrator') && !is_page('clinic-signup')) {
+        show_admin_bar(false);
+        add_filter('show_admin_bar', '__return_false');
+
+        // Visually hide header/footer, not remove WordPress actions
+        add_action('wp_enqueue_scripts', function () {
+            echo '<style>
+                body.logged-in header,
+                body.logged-in footer {
+                    display: none !important;
+                }
+            </style>';
+        });
+    }
+});

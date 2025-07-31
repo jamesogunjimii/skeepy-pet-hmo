@@ -1,0 +1,503 @@
+/**
+ * Skeepy HMO Admin Dashboard Shortcode
+ * Complete administrative interface for system management
+ */
+
+function skeepy_admin_dashboard_shortcode() {
+    // Check admin access
+    if (!current_user_can('administrator') && !current_user_can('skeepy_admin')) {
+        return '<div class="skeepy-error">Access denied. Administrator privileges required.</div>';
+    }
+    
+    ob_start();
+    ?>
+    <div class="skeepy-admin-dashboard">
+        <!-- Header -->
+        <div class="dashboard-header">
+            <div class="greeting">
+                <h1>Skeepy HMO Administration</h1>
+                <p>System overview and management</p>
+            </div>
+            <div class="admin-actions">
+                <button class="btn-primary" id="system-backup">
+                    <i class="fas fa-download"></i>
+                    <span>Backup Data</span>
+                </button>
+                <button class="btn-secondary" id="system-settings">
+                    <i class="fas fa-cog"></i>
+                    <span>Settings</span>
+                </button>
+            </div>
+        </div>
+        
+        <!-- Navigation -->
+        <div class="dashboard-nav">
+            <button class="nav-btn active" data-section="overview">
+                <i class="fas fa-tachometer-alt"></i>
+                <span>Overview</span>
+            </button>
+            <button class="nav-btn" data-section="claims">
+                <i class="fas fa-file-medical"></i>
+                <span>Claims Management</span>
+            </button>
+            <button class="nav-btn" data-section="pets">
+                <i class="fas fa-paw"></i>
+                <span>Pet Management</span>
+            </button>
+            <button class="nav-btn" data-section="clinics">
+                <i class="fas fa-clinic-medical"></i>
+                <span>Clinic Management</span>
+            </button>
+            <button class="nav-btn" data-section="payments">
+                <i class="fas fa-credit-card"></i>
+                <span>Payments</span>
+            </button>
+            <button class="nav-btn" data-section="reports">
+                <i class="fas fa-chart-line"></i>
+                <span>Reports</span>
+            </button>
+            <button class="nav-btn" data-section="users">
+                <i class="fas fa-users"></i>
+                <span>User Management</span>
+            </button>
+        </div>
+        
+        <!-- Main Content -->
+        <div class="dashboard-content">
+            <!-- Overview Section -->
+            <div id="overview-section" class="dashboard-section active">
+                <div class="stats-overview">
+                    <div class="stat-card primary">
+                        <div class="stat-icon">
+                            <i class="fas fa-paw"></i>
+                        </div>
+                        <div class="stat-content">
+                            <h3 id="total-pets">0</h3>
+                            <p>Total Pets</p>
+                            <small id="active-pets">0 active plans</small>
+                        </div>
+                    </div>
+                    
+                    <div class="stat-card success">
+                        <div class="stat-icon">
+                            <i class="fas fa-clinic-medical"></i>
+                        </div>
+                        <div class="stat-content">
+                            <h3 id="total-clinics">0</h3>
+                            <p>Partner Clinics</p>
+                            <small id="pending-clinics">0 pending approval</small>
+                        </div>
+                    </div>
+                    
+                    <div class="stat-card warning">
+                        <div class="stat-icon">
+                            <i class="fas fa-clock"></i>
+                        </div>
+                        <div class="stat-content">
+                            <h3 id="pending-claims">0</h3>
+                            <p>Pending Claims</p>
+                            <small>Awaiting review</small>
+                        </div>
+                    </div>
+                    
+                    <div class="stat-card info">
+                        <div class="stat-icon">
+                            <i class="fas fa-money-bill-wave"></i>
+                        </div>
+                        <div class="stat-content">
+                            <h3 id="monthly-revenue">₦0</h3>
+                            <p>Monthly Revenue</p>
+                            <small id="revenue-growth">0% vs last month</small>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="overview-grid">
+                    <div class="overview-card">
+                        <div class="card-header">
+                            <h3>Recent Activity</h3>
+                            <button class="btn-link" id="view-all-activity">View All</button>
+                        </div>
+                        <div class="card-content">
+                            <div id="recent-activity">
+                                <p>Loading recent activity...</p>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="overview-card">
+                        <div class="card-header">
+                            <h3>System Alerts</h3>
+                            <span class="alert-count" id="alert-count">0</span>
+                        </div>
+                        <div class="card-content">
+                            <div id="system-alerts">
+                                <p>No alerts at this time.</p>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="overview-card">
+                        <div class="card-header">
+                            <h3>Quick Actions</h3>
+                        </div>
+                        <div class="card-content">
+                            <div class="quick-actions">
+                                <button class="action-btn" data-section="claims">
+                                    <i class="fas fa-gavel"></i>
+                                    <span>Review Claims</span>
+                                </button>
+                                <button class="action-btn" data-section="clinics">
+                                    <i class="fas fa-check"></i>
+                                    <span>Approve Clinics</span>
+                                </button>
+                                <button class="action-btn" data-section="reports">
+                                    <i class="fas fa-file-export"></i>
+                                    <span>Generate Reports</span>
+                                </button>
+                                <button class="action-btn" id="send-notifications">
+                                    <i class="fas fa-bell"></i>
+                                    <span>Send Notifications</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Claims Management Section -->
+            <div id="claims-section" class="dashboard-section">
+                <div class="section-header">
+                    <h2>Claims Management</h2>
+                    <div class="filter-controls">
+                        <select id="claims-status-filter">
+                            <option value="">All Status</option>
+                            <option value="pending">Pending</option>
+                            <option value="approved">Approved</option>
+                            <option value="rejected">Rejected</option>
+                        </select>
+                        <select id="claims-clinic-filter">
+                            <option value="">All Clinics</option>
+                        </select>
+                        <input type="date" id="claims-date-from">
+                        <input type="date" id="claims-date-to">
+                        <button id="apply-claims-filter" class="btn-secondary">Apply Filters</button>
+                    </div>
+                </div>
+                
+                <div class="table-container">
+                    <div id="claims-table">
+                        <p>Loading claims...</p>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Pet Management Section -->
+            <div id="pets-section" class="dashboard-section">
+                <div class="section-header">
+                    <h2>Pet Management</h2>
+                    <div class="search-controls">
+                        <input type="text" id="pet-search" placeholder="Search by name, HMO ID, or guardian...">
+                        <select id="pet-plan-filter">
+                            <option value="">All Plans</option>
+                            <option value="pawtastic">Pawtastic</option>
+                            <option value="furrtastic">Furrtastic</option>
+                            <option value="purrfect">Purrfect</option>
+                        </select>
+                        <select id="pet-status-filter">
+                            <option value="">All Status</option>
+                            <option value="active">Active</option>
+                            <option value="inactive">Inactive</option>
+                            <option value="expired">Expired</option>
+                        </select>
+                        <button id="search-pets" class="btn-secondary">Search</button>
+                    </div>
+                </div>
+                
+                <div class="table-container">
+                    <div id="pets-table">
+                        <p>Loading pets...</p>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Clinic Management Section -->
+            <div id="clinics-section" class="dashboard-section">
+                <div class="section-header">
+                    <h2>Clinic Management</h2>
+                    <div class="filter-controls">
+                        <select id="clinic-status-filter">
+                            <option value="">All Status</option>
+                            <option value="pending">Pending</option>
+                            <option value="approved">Approved</option>
+                            <option value="rejected">Rejected</option>
+                            <option value="suspended">Suspended</option>
+                        </select>
+                        <select id="clinic-state-filter">
+                            <option value="">All States</option>
+                            <option value="lagos">Lagos</option>
+                            <option value="abuja">Abuja</option>
+                            <option value="kano">Kano</option>
+                        </select>
+                        <button id="apply-clinic-filter" class="btn-secondary">Apply Filters</button>
+                        <button id="export-clinics" class="btn-secondary">Export</button>
+                    </div>
+                </div>
+                
+                <div class="clinics-container">
+                    <div id="clinics-grid">
+                        <p>Loading clinics...</p>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Payments Section -->
+            <div id="payments-section" class="dashboard-section">
+                <div class="section-header">
+                    <h2>Payment Management</h2>
+                    <div class="payment-stats">
+                        <div class="payment-stat">
+                            <label>Total Collected:</label>
+                            <span id="total-collected">₦0</span>
+                        </div>
+                        <div class="payment-stat">
+                            <label>Pending Payouts:</label>
+                            <span id="pending-payouts">₦0</span>
+                        </div>
+                        <div class="payment-stat">
+                            <label>This Month:</label>
+                            <span id="monthly-payments">₦0</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="payments-grid">
+                    <div class="payment-card">
+                        <h3>Recent Payments</h3>
+                        <div id="recent-payments">
+                            <p>Loading recent payments...</p>
+                        </div>
+                    </div>
+                    
+                    <div class="payment-card">
+                        <h3>Failed Payments</h3>
+                        <div id="failed-payments">
+                            <p>Loading failed payments...</p>
+                        </div>
+                    </div>
+                    
+                    <div class="payment-card">
+                        <h3>Payout Management</h3>
+                        <div class="payout-actions">
+                            <button class="btn-primary" id="process-payouts">
+                                <i class="fas fa-money-bill-transfer"></i>
+                                <span>Process Pending Payouts</span>
+                            </button>
+                            <button class="btn-secondary" id="generate-payout-report">
+                                <i class="fas fa-file-csv"></i>
+                                <span>Generate Payout Report</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Reports Section -->
+            <div id="reports-section" class="dashboard-section">
+                <div class="section-header">
+                    <h2>Reports & Analytics</h2>
+                    <div class="report-controls">
+                        <select id="report-type">
+                            <option value="revenue">Revenue Report</option>
+                            <option value="claims">Claims Report</option>
+                            <option value="pets">Pet Registration Report</option>
+                            <option value="clinics">Clinic Performance Report</option>
+                        </select>
+                        <select id="report-period">
+                            <option value="7">Last 7 Days</option>
+                            <option value="30" selected>Last 30 Days</option>
+                            <option value="90">Last 90 Days</option>
+                            <option value="365">Last Year</option>
+                            <option value="custom">Custom Range</option>
+                        </select>
+                        <div id="custom-date-range" style="display: none;">
+                            <input type="date" id="report-from">
+                            <input type="date" id="report-to">
+                        </div>
+                        <button id="generate-report" class="btn-primary">Generate Report</button>
+                    </div>
+                </div>
+                
+                <div class="reports-content">
+                    <div class="charts-grid">
+                        <div class="chart-container">
+                            <h4>Revenue Trends</h4>
+                            <canvas id="revenue-chart"></canvas>
+                        </div>
+                        
+                        <div class="chart-container">
+                            <h4>Plan Distribution</h4>
+                            <canvas id="plans-chart"></canvas>
+                        </div>
+                        
+                        <div class="chart-container">
+                            <h4>Claims by Status</h4>
+                            <canvas id="claims-chart"></canvas>
+                        </div>
+                        
+                        <div class="chart-container">
+                            <h4>Geographic Distribution</h4>
+                            <canvas id="geographic-chart"></canvas>
+                        </div>
+                    </div>
+                    
+                    <div class="report-export">
+                        <h4>Export Options</h4>
+                        <div class="export-buttons">
+                            <button class="btn-secondary" id="export-pdf">
+                                <i class="fas fa-file-pdf"></i>
+                                <span>Export as PDF</span>
+                            </button>
+                            <button class="btn-secondary" id="export-excel">
+                                <i class="fas fa-file-excel"></i>
+                                <span>Export as Excel</span>
+                            </button>
+                            <button class="btn-secondary" id="export-csv">
+                                <i class="fas fa-file-csv"></i>
+                                <span>Export as CSV</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- User Management Section -->
+            <div id="users-section" class="dashboard-section">
+                <div class="section-header">
+                    <h2>User Management</h2>
+                    <div class="user-controls">
+                        <button class="btn-primary" id="add-admin-user">
+                            <i class="fas fa-user-plus"></i>
+                            <span>Add Admin User</span>
+                        </button>
+                        <button class="btn-secondary" id="bulk-actions">
+                            <i class="fas fa-tasks"></i>
+                            <span>Bulk Actions</span>
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="users-content">
+                    <div class="user-stats">
+                        <div class="user-stat">
+                            <label>Total Users:</label>
+                            <span id="total-users">0</span>
+                        </div>
+                        <div class="user-stat">
+                            <label>Pet Parents:</label>
+                            <span id="pet-parents">0</span>
+                        </div>
+                        <div class="user-stat">
+                            <label>Clinic Partners:</label>
+                            <span id="clinic-partners">0</span>
+                        </div>
+                        <div class="user-stat">
+                            <label>Administrators:</label>
+                            <span id="admin-users">0</span>
+                        </div>
+                    </div>
+                    
+                    <div class="users-table-container">
+                        <div id="users-table">
+                            <p>Loading users...</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Modals -->
+        <div id="claim-modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Claim Details</h3>
+                    <span class="close">&times;</span>
+                </div>
+                <div class="modal-body">
+                    <!-- Claim details will be loaded here -->
+                </div>
+            </div>
+        </div>
+        
+        <div id="clinic-modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Clinic Details</h3>
+                    <span class="close">&times;</span>
+                </div>
+                <div class="modal-body">
+                    <!-- Clinic details will be loaded here -->
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+    jQuery(document).ready(function($) {
+        // Initialize admin dashboard
+        initializeDashboardNavigation();
+        initializeAdminFunctionality();
+        loadOverviewData();
+        
+        // Custom date range toggle
+        $('#report-period').on('change', function() {
+            if ($(this).val() === 'custom') {
+                $('#custom-date-range').show();
+            } else {
+                $('#custom-date-range').hide();
+            }
+        });
+        
+        // System backup functionality
+        $('#system-backup').on('click', function() {
+            if (confirm('Generate system backup? This may take a few minutes.')) {
+                generateSystemBackup();
+            }
+        });
+        
+        // Auto-refresh dashboard every 5 minutes
+        setInterval(function() {
+            if ($('#overview-section').hasClass('active')) {
+                loadOverviewData();
+            }
+        }, 300000);
+    });
+    
+    function generateSystemBackup() {
+        jQuery.ajax({
+            url: skeepy_ajax.ajax_url,
+            type: 'POST',
+            data: {
+                action: 'skeepy_generate_backup',
+                nonce: skeepy_ajax.nonce
+            },
+            beforeSend: function() {
+                showMessage('Generating backup...', 'info');
+            },
+            success: function(response) {
+                if (response.success) {
+                    showMessage('Backup generated successfully!', 'success');
+                    // Trigger download
+                    window.location.href = response.data.download_url;
+                } else {
+                    showMessage('Backup failed: ' + response.data, 'error');
+                }
+            }
+        });
+    }
+    </script>
+    <?php
+    return ob_get_clean();
+}
+
+add_shortcode('skeepy_admin_dashboard', 'skeepy_admin_dashboard_shortcode');

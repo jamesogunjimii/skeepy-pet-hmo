@@ -1,0 +1,3864 @@
+/**
+ * Skeepy Pet Dashboard - Complete System
+ * Mobile-first responsive dashboard for pet parents
+ * Multi-pet support with account switching
+ * Real data integration from claims and pets tables
+ */
+
+// Prevent direct access
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+// Pet parent role check (function already declared elsewhere)
+
+// Register AJAX handlers
+add_action('wp_ajax_skeepy_pet_dashboard_data', 'skeepy_pet_dashboard_data_handler');
+add_action('wp_ajax_skeepy_switch_pet', 'skeepy_switch_pet_handler');
+add_action('wp_ajax_skeepy_update_guardian_info', 'skeepy_update_guardian_info_handler');
+add_action('wp_ajax_skeepy_get_vet_visits', 'skeepy_get_vet_visits_handler');
+add_action('wp_ajax_skeepy_get_claim_details', 'skeepy_get_claim_details_handler');
+add_action('wp_ajax_skeepy_pet_logout', 'skeepy_pet_logout_handler');
+
+// Register shortcode
+add_shortcode('skeepy_pet_dashboard', 'skeepy_pet_dashboard_shortcode');
+
+function skeepy_pet_dashboard_shortcode() {
+    // Check if user is logged in and has pet parent role
+    if (!is_user_logged_in()) {
+        return '<div class="skeepy-error">Please <a href="/pet-login">login</a> to access your pet dashboard.</div>';
+    }
+    
+    $current_user = wp_get_current_user();
+    if (!in_array('skeepy_pet_parent', $current_user->roles)) {
+        return '<div class="skeepy-error">Access denied. This dashboard is for pet parents only.</div>';
+    }
+    
+    ob_start();
+    ?>
+    <div class="skeepy-pet-dashboard">
+        <div class="skeepy-dashboard-container">
+            <div class="main-content">
+                <!-- Dashboard Overview -->
+                <div class="skeepy-content-section active" id="dashboard-section">
+                    <!-- Greeting Section -->
+                    <div class="greeting-section">
+                        <h2 id="skeepy-greeting">Good Morning!</h2>
+                        <p id="skeepy-dashboard-subtitle">You are in <span id="current-pet-name">Loading...</span>'s Skeepy Dashboard</p>
+                    </div>
+
+                    <!-- Status Info -->
+                    <div class="skeepy-status-info">
+                        <div class="skeepy-status-item">
+                            <span class="skeepy-status-label">Account Status:</span>
+                            <span class="skeepy-status-value status-approved" id="account-status">Loading...</span>
+                        </div>
+                        <div class="skeepy-status-item">
+                            <span class="skeepy-status-label">HMO ID:</span>
+                            <span class="skeepy-status-value" id="current-hmo-id">Loading...</span>
+                        </div>
+                    </div>
+
+                    <!-- Amount Paid Out Card -->
+                    <div class="skeepy-balance-card">
+                        <div class="skeepy-balance-header">
+                            <div class="balance-label">Amount Paid Out</div>
+                            <button class="skeepy-balance-icon" onclick="refreshAmountPaidOut()" id="refresh-icon">
+                                <i class="fas fa-sync-alt"></i>
+                            </button>
+                        </div>
+                        <div class="skeepy-balance-amount" id="amount-paid-out">₦0.00</div>
+                        <div class="skeepy-balance-subtitle">Updated just now</div>
+                    </div>
+
+                    <!-- Stats Grid -->
+                    <div class="skeepy-stats-grid">
+                        <div class="skeepy-stat-card">
+                            <div class="skeepy-stat-content">
+                                <div class="skeepy-stat-icon pets">
+                                    <i class="fas fa-paw"></i>
+                                </div>
+                                <div class="skeepy-stat-info">
+                                    <div class="skeepy-stat-label">Number of Pets</div>
+                                    <div class="skeepy-stat-number" id="number-of-pets">Loading...</div>
+                                    <button class="switch-btn" id="switch-pet-btn-stat" style="display: none;">
+                                        Switch
+                                        <i class="fas fa-exchange-alt"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="skeepy-stat-card">
+                            <div class="skeepy-stat-content">
+                                <div class="skeepy-stat-icon payments">
+                                    <i class="fas fa-calendar-check"></i>
+                                </div>
+                                <div class="skeepy-stat-info">
+                                    <div class="skeepy-stat-label">Plan Streak</div>
+                                    <div class="skeepy-stat-number" id="plan-streak">Loading...</div>
+                                </div>
+                            </div>
+                            <div class="skeepy-info-icon" onclick="event.stopPropagation(); showInfoPopup(event, 'plan-streak-info')">i</div>
+                        </div>
+                        
+                        <div class="skeepy-stat-card">
+                            <div class="skeepy-stat-content">
+                                <div class="skeepy-stat-icon claims">
+                                    <i class="fas fa-stethoscope"></i>
+                                </div>
+                                <div class="skeepy-stat-info">
+                                    <div class="skeepy-stat-label">Total Vet Visits</div>
+                                    <div class="skeepy-stat-number" id="total-vet-visits">Loading...</div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="skeepy-stat-card">
+                            <div class="skeepy-stat-content">
+                                <div class="skeepy-stat-icon skeepers">
+                                    <i class="fas fa-users"></i>
+                                </div>
+                                <div class="skeepy-stat-info">
+                                    <div class="skeepy-stat-label">Skeepers From Me</div>
+                                    <div class="skeepy-stat-number" id="skeepers-from-me">0</div>
+                                </div>
+                            </div>
+                            <div class="skeepy-info-icon" onclick="event.stopPropagation(); showInfoPopup(event, 'skeepers-info')">i</div>
+                        </div>
+                        
+                        <div class="skeepy-stat-card">
+                            <div class="skeepy-stat-content">
+                                <div class="skeepy-stat-icon title">
+                                    <i class="fas fa-trophy"></i>
+                                </div>
+                                <div class="skeepy-stat-info">
+                                    <div class="skeepy-stat-label">Skeeper Title</div>
+                                    <div class="skeepy-stat-number" id="skeeper-title">Rookie</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Quick Access -->
+                    <div class="skeepy-quick-access">
+                        <h3>Quick Access</h3>
+                        <div class="skeepy-quick-access-grid">
+                            <div class="skeepy-quick-access-item" data-section="profile">
+                                <div class="skeepy-quick-access-icon">
+                                    <i class="fas fa-paw"></i>
+                                </div>
+                                <span>Pet Profile</span>
+                            </div>
+                            <div class="skeepy-quick-access-item" data-section="visits">
+                                <div class="skeepy-quick-access-icon">
+                                    <i class="fas fa-stethoscope"></i>
+                                </div>
+                                <span>Vet Visits</span>
+                            </div>
+                            <div class="skeepy-quick-access-item" data-section="coverage">
+                                <div class="skeepy-quick-access-icon">
+                                    <i class="fas fa-shield-alt"></i>
+                                </div>
+                                <span>Coverage</span>
+                            </div>
+                            <div class="skeepy-quick-access-item" data-section="support">
+                                <div class="skeepy-quick-access-icon">
+                                    <i class="fas fa-headset"></i>
+                                </div>
+                                <span>Support</span>
+                            </div>
+                            <div class="skeepy-quick-access-item" data-section="skeeper-circle">
+                                <div class="skeepy-quick-access-icon">
+                                    <i class="fas fa-users"></i>
+                                </div>
+                                <span>Skeeper Circle</span>
+                            </div>
+                            <div class="skeepy-quick-access-item" data-section="health-tracker">
+                                <div class="skeepy-quick-access-icon">
+                                    <i class="fas fa-heartbeat"></i>
+                                </div>
+                                <span>Health Tracker</span>
+                            </div>
+                            <div class="skeepy-quick-access-item" id="signout-access">
+                                <div class="skeepy-quick-access-icon">
+                                    <i class="fas fa-sign-out-alt"></i>
+                                </div>
+                                <span>Sign Out</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Pet Profile Section -->
+                <div class="skeepy-content-section" id="profile-section">
+                    <div class="skeepy-section-header">
+                        <button class="skeepy-back-btn" data-target="dashboard">← Back to Dashboard</button>
+                        <h2>Pet Profile</h2>
+                    </div>
+                    
+                    <div class="skeepy-profile-container">
+                        <!-- Pet Information -->
+                        <div class="skeepy-profile-section">
+                            <h3>Pet Information</h3>
+                            <div class="skeepy-profile-grid" id="pet-info-grid">
+                                <!-- Will be populated by JavaScript -->
+                            </div>
+                        </div>
+                        
+                        <!-- Guardian Information -->
+                        <div class="skeepy-profile-section">
+                            <div class="skeepy-profile-header">
+                                <h3>Guardian Information</h3>
+                                <button class="skeepy-edit-btn" id="edit-guardian-btn">Edit</button>
+                            </div>
+                            <div class="skeepy-profile-grid" id="guardian-info-grid">
+                                <!-- Will be populated by JavaScript -->
+                            </div>
+                        </div>
+                        
+                        <!-- Plan Information -->
+                        <div class="skeepy-profile-section">
+                            <h3>Plan Information</h3>
+                            <div class="skeepy-profile-grid" id="plan-info-grid">
+                                <!-- Will be populated by JavaScript -->
+                            </div>
+                        </div>
+                        
+                        <!-- Coverage Information -->
+                        <div class="skeepy-profile-section">
+                            <h3>Coverage</h3>
+                            <div class="skeepy-coverage-container" id="coverage-container">
+                                <!-- Will be populated by JavaScript -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Coverage Section -->
+                <div class="skeepy-content-section" id="coverage-section">
+                    <div class="skeepy-section-header">
+                        <button class="skeepy-back-btn" data-target="dashboard">
+                            <i class="fas fa-arrow-left"></i> Back to Dashboard
+                        </button>
+                        <h2>Coverage</h2>
+                        <p>Verified HMO ID details</p>
+                    </div>
+                    
+                    <div class="skeepy-coverage-container">
+                        <!-- Hospital Section -->
+                        <div class="info-card">
+                            <h3><i class="fas fa-hospital"></i> Hospital</h3>
+                            <div class="info-item">
+                                <span>Clinic Name</span>
+                                <span id="hospital-clinic-name">Loading...</span>
+                            </div>
+                            <div class="info-item">
+                                <span>Provider ID</span>
+                                <span id="hospital-provider-id">Loading...</span>
+                            </div>
+                            <div class="info-item">
+                                <span>Address</span>
+                                <span id="hospital-address">Loading...</span>
+                            </div>
+                            <div class="info-item">
+                                <span>Representative</span>
+                                <span id="hospital-representative">Loading...</span>
+                            </div>
+                            <div class="info-item">
+                                <span>Phone</span>
+                                <span id="hospital-phone">Loading...</span>
+                            </div>
+                            <div class="info-item">
+                                <span>Email</span>
+                                <span id="hospital-email">Loading...</span>
+                            </div>
+                        </div>
+                        
+                        <!-- Benefits Section -->
+                        <div class="info-card">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                                <h3><i class="fas fa-shield-alt"></i> Benefits</h3>
+                                <span style="font-size: 14px; color: #6B7280;">Availability</span>
+                            </div>
+                            <div id="benefits-container">
+                                <!-- Will be populated by JavaScript -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Vet Visits Section -->
+                <div class="skeepy-content-section" id="visits-section">
+                    <div class="skeepy-section-header">
+                        <button class="skeepy-back-btn" data-target="dashboard">← Back to Dashboard</button>
+                        <h2>Vet Visits</h2>
+                    </div>
+                    
+                    <div class="skeepy-visits-container">
+                        <!-- Filter Section -->
+                        <div class="skeepy-filter-section">
+                            <div class="skeepy-filter-group">
+                                <label for="date-filter">Filter by Date:</label>
+                                <select id="date-filter">
+                                    <option value="all">All Time</option>
+                                    <option value="this_week">This Week</option>
+                                    <option value="this_month">This Month</option>
+                                    <option value="this_year">This Year</option>
+                                    <option value="custom">Custom Range</option>
+                                </select>
+                            </div>
+                            <div class="skeepy-custom-date-range" id="custom-date-range" style="display: none;">
+                                <input type="date" id="start-date" placeholder="Start Date">
+                                <input type="date" id="end-date" placeholder="End Date">
+                            </div>
+                            <button class="skeepy-filter-btn" id="apply-filter">Apply Filter</button>
+                        </div>
+                        
+                        <!-- Visits Table -->
+                        <div class="skeepy-visits-table-container">
+                            <table class="skeepy-visits-table">
+                                <thead>
+                                    <tr>
+                                        <th>Date</th>
+                                        <th>Claim ID</th>
+                                        <th>Details</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="visits-table-body">
+                                    <!-- Will be populated by JavaScript -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Support Section -->
+                <div class="skeepy-content-section" id="support-section">
+                    <div class="skeepy-section-header">
+                        <button class="skeepy-back-btn" data-target="dashboard">← Back to Dashboard</button>
+                        <h2>Support</h2>
+                    </div>
+                    
+                    <div class="skeepy-support-container">
+                        <div class="skeepy-support-grid">
+                            <div class="skeepy-support-item">
+                                <div class="skeepy-support-icon">💬</div>
+                                <h3>Live Chat</h3>
+                                <p>Get instant help from our support team</p>
+                                <button class="skeepy-support-btn" onclick="skeepy_open_chat()">Start Chat</button>
+                            </div>
+                            
+                            <div class="skeepy-support-item">
+                                <div class="skeepy-support-icon">📧</div>
+                                <h3>Email Support</h3>
+                                <p>Send us an email and we'll get back to you</p>
+                                <button class="skeepy-support-btn" onclick="skeepy_open_email()">Send Email</button>
+                            </div>
+                            
+                            <div class="skeepy-support-item">
+                                <div class="skeepy-support-icon">📞</div>
+                                <h3>Phone Support</h3>
+                                <p>Call us directly for immediate assistance</p>
+                                <button class="skeepy-support-btn" onclick="skeepy_open_phone()">Call Now</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Skeeper Circle Section -->
+                <div class="skeepy-content-section" id="skeeper-circle-section">
+                    <div class="skeepy-section-header">
+                        <button class="skeepy-back-btn" data-target="dashboard">← Back to Dashboard</button>
+                        <h2>Skeeper Circle</h2>
+                    </div>
+                    
+                    <div class="skeepy-circle-container">
+                        <div class="skeepy-referral-section">
+                            <h3>Your Referral Details</h3>
+                            
+                            <div class="skeepy-referral-item">
+                                <label>Referral Code:</label>
+                                <div class="skeepy-referral-value">
+                                    <span id="referral-code">Loading...</span>
+                                    <button class="skeepy-copy-btn" onclick="copyReferralCode()">
+                                        <i class="fas fa-copy"></i>
+                                    </button>
+                                </div>
+                            </div>
+                            
+                            <div class="skeepy-referral-item">
+                                <label>Referral URL:</label>
+                                <div class="skeepy-referral-value">
+                                    <span id="referral-url">Loading...</span>
+                                    <button class="skeepy-copy-btn" onclick="copyReferralURL()">
+                                        <i class="fas fa-copy"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="skeepy-referrals-section">
+                            <h3>Your Referrals</h3>
+                            <div class="skeepy-referrals-table-container">
+                                <table class="skeepy-referrals-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Name</th>
+                                            <th>Status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="referrals-table-body">
+                                        <!-- Will be populated by JavaScript -->
+                                    </tbody>
+                                </table>
+                            </div>
+                            
+                            <div class="skeepy-pagination" id="referrals-pagination">
+                                <button class="skeepy-page-btn" onclick="loadReferrals(1)">1-10</button>
+                                <button class="skeepy-page-btn" onclick="loadReferrals(2)">11-20</button>
+                                <button class="skeepy-page-btn" onclick="loadReferrals(3)">21-30</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Health Tracker Section -->
+                <div class="skeepy-content-section" id="health-tracker-section">
+                    <div class="skeepy-section-header">
+                        <button class="skeepy-back-btn" data-target="dashboard">← Back to Dashboard</button>
+                        <h2>Health Tracker</h2>
+                    </div>
+                    
+                    <div class="skeepy-health-tracker-container">
+                        <div class="skeepy-coming-soon">
+                            <div class="skeepy-coming-soon-icon">
+                                <i class="fas fa-heartbeat"></i>
+                            </div>
+                            <h3>Coming Soon</h3>
+                            <p>We're working on an amazing health tracking feature for your pet. Stay tuned!</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Switch Pet Modal -->
+        <div class="support-modal" id="switch-pet-modal">
+            <div class="modal-dialog">
+                <div class="modal-header">
+                    <h3 style="color: #f9edd7;">Switch Pet Account</h3>
+                    <button class="skeepy-modal-close" onclick="skeepy_close_modal('switch-pet-modal')" style="color: red;">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="skeepy-pet-list" id="pet-list-container">
+                        <!-- Will be populated by JavaScript -->
+                    </div>
+                    <div class="skeepy-modal-actions">
+                        <button class="skeepy-btn skeepy-btn-primary" onclick="skeepy_switch_pet()">Switch Account</button>
+                        <button class="skeepy-btn skeepy-btn-secondary" onclick="skeepy_close_modal('switch-pet-modal')">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Edit Guardian Modal -->
+        <div class="support-modal" id="edit-guardian-modal">
+            <div class="modal-dialog">
+                <div class="modal-header">
+                    <h3>Edit Guardian Information</h3>
+                    <button class="skeepy-modal-close" onclick="skeepy_close_modal('edit-guardian-modal')">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <form id="edit-guardian-form">
+                        <div class="skeepy-form-group">
+                            <label for="edit-first-name">First Name</label>
+                            <input type="text" id="edit-first-name" name="first_name" required>
+                        </div>
+                        <div class="skeepy-form-group">
+                            <label for="edit-surname">Surname</label>
+                            <input type="text" id="edit-surname" name="surname" required>
+                        </div>
+                        <div class="skeepy-form-group">
+                            <label for="edit-phone">Phone</label>
+                            <input type="tel" id="edit-phone" name="phone" required>
+                        </div>
+                        <div class="skeepy-form-group">
+                            <label for="edit-address">Address</label>
+                            <textarea id="edit-address" name="address" required></textarea>
+                        </div>
+                        <div class="skeepy-form-group">
+                            <label for="edit-state">State</label>
+                            <select id="edit-state" name="state" required>
+                                <option value="">Select State</option>
+                                <option value="Abia">Abia</option>
+                                <option value="Adamawa">Adamawa</option>
+                                <option value="Akwa Ibom">Akwa Ibom</option>
+                                <option value="Anambra">Anambra</option>
+                                <option value="Bauchi">Bauchi</option>
+                                <option value="Bayelsa">Bayelsa</option>
+                                <option value="Benue">Benue</option>
+                                <option value="Borno">Borno</option>
+                                <option value="Cross River">Cross River</option>
+                                <option value="Delta">Delta</option>
+                                <option value="Ebonyi">Ebonyi</option>
+                                <option value="Edo">Edo</option>
+                                <option value="Ekiti">Ekiti</option>
+                                <option value="Enugu">Enugu</option>
+                                <option value="FCT">FCT</option>
+                                <option value="Gombe">Gombe</option>
+                                <option value="Imo">Imo</option>
+                                <option value="Jigawa">Jigawa</option>
+                                <option value="Kaduna">Kaduna</option>
+                                <option value="Kano">Kano</option>
+                                <option value="Katsina">Katsina</option>
+                                <option value="Kebbi">Kebbi</option>
+                                <option value="Kogi">Kogi</option>
+                                <option value="Kwara">Kwara</option>
+                                <option value="Lagos">Lagos</option>
+                                <option value="Nasarawa">Nasarawa</option>
+                                <option value="Niger">Niger</option>
+                                <option value="Ogun">Ogun</option>
+                                <option value="Ondo">Ondo</option>
+                                <option value="Osun">Osun</option>
+                                <option value="Oyo">Oyo</option>
+                                <option value="Plateau">Plateau</option>
+                                <option value="Rivers">Rivers</option>
+                                <option value="Sokoto">Sokoto</option>
+                                <option value="Taraba">Taraba</option>
+                                <option value="Yobe">Yobe</option>
+                                <option value="Zamfara">Zamfara</option>
+                            </select>
+                        </div>
+                        <div class="skeepy-modal-actions">
+                            <button type="submit" class="skeepy-btn skeepy-btn-primary">Update Information</button>
+                            <button type="button" class="skeepy-btn skeepy-btn-secondary" onclick="skeepy_close_modal('edit-guardian-modal')">Cancel</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <!-- Claim Details Modal -->
+        <div class="support-modal" id="claim-details-modal">
+            <div class="modal-dialog">
+                <div class="modal-header">
+                    <h3>Claim Details</h3>
+                    <button class="skeepy-modal-close" onclick="skeepy_close_modal('claim-details-modal')">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div id="claim-details-content">
+                        <!-- Will be populated by JavaScript -->
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Support Modal -->
+        <div class="support-modal" id="support-modal">
+            <div class="modal-dialog">
+                <div class="modal-header">
+                    <h3 class="modal-title">Contact Support</h3>
+                    <button class="modal-close" onclick="closeSupportModal()" style="color: red;">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                
+                <div class="modal-body">
+                    <a href="javascript:void(0)" onclick="window.open('tel:02013306472', '_self')" class="support-item">
+                        <i class="fas fa-phone"></i>
+                        <div class="support-text">
+                            <div class="support-label">Call</div>
+                            <div class="support-value">02013306472</div>
+                        </div>
+                    </a>
+                    
+                    <a href="javascript:void(0)" onclick="window.open('mailto:help@skeepy.co', '_self')" class="support-item">
+                        <i class="fas fa-envelope"></i>
+                        <div class="support-text">
+                            <div class="support-label">Email</div>
+                            <div class="support-value">help@skeepy.co</div>
+                        </div>
+                    </a>
+                    
+                    <a href="javascript:void(0)" onclick="window.open('https://wa.me/2349032810410', '_blank')" class="support-item">
+                        <i class="fab fa-whatsapp"></i>
+                        <div class="support-text">
+                            <div class="support-label">WhatsApp</div>
+                            <div class="support-value">09032810410</div>
+                        </div>
+                    </a>
+                </div>
+            </div>
+        </div>
+
+        <!-- Sign Out Modal -->
+        <div class="support-modal" id="signout-modal">
+            <div class="modal-dialog">
+                <div class="modal-header">
+                    <h3 class="modal-title">Want to sign out?</h3>
+                    <button class="modal-close" onclick="closeSignOutModal()" style="color: red;">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                
+                <div class="modal-body">
+                    <div style="display: flex; gap: 12px; justify-content: center; margin-top: 20px;">
+                        <button onclick="closeSignOutModal()" style="padding: 12px 24px; background: #F3F4F6; color: #374151; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: all 0.2s ease; min-width: 80px;">
+                            No
+                        </button>
+                        <button onclick="skeepy_confirm_logout()" style="padding: 12px 24px; background: #DC2626; color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: all 0.2s ease; min-width: 80px;">
+                            Yes
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Sign Out Modal -->
+        <div class="support-modal" id="skeepy-signout-modal">
+            <div class="modal-dialog">
+                <div class="modal-header">
+                    <h5 class="modal-title">Want to sign out?</h5>
+                    <button class="modal-close" onclick="closeSignOutModal()">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <p>Are you sure you want to sign out of your Skeepy account?</p>
+                    <div class="skeepy-modal-actions">
+                        <button class="skeepy-btn skeepy-btn-primary" onclick="confirmPetSignOut()">Yes, Sign Out</button>
+                        <button class="skeepy-btn skeepy-btn-secondary" onclick="closeSignOutModal()">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+        <style>
+            @import url('https://fonts.googleapis.com/css2?family=SF+Pro+Display:wght@300;400;500;600;700;800&display=swap');
+            
+            /* Force cream background on entire page */
+            body, html {
+                background: #f9edd7 !important;
+                background-color: #f9edd7 !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                min-height: 100vh !important;
+            }
+
+            /* Override any theme/WordPress container backgrounds */
+            .site, .site-content, .content-area, .site-main, .entry-content, 
+            .page, .post, .container, .main-content, .page-content,
+            .elementor, .elementor-section, .elementor-container,
+            .wp-block-group, .wp-site-blocks, .wp-block-post-content {
+                background: #f9edd7 !important;
+                background-color: #f9edd7 !important;
+            }
+
+            /* Remove any margins/padding that create white space */
+            .site-content, .content-area, .site-main, .entry-content {
+                margin: 0 !important;
+                padding: 0 !important;
+            }
+
+            .skeepy-pet-dashboard * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+
+            .skeepy-pet-dashboard {
+                font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, sans-serif;
+                background: #f9edd7;
+                color: #145362;
+                line-height: 1.4;
+                font-size: 14px;
+                margin: -20px;
+                padding: 0;
+                min-height: 100vh;
+            }
+
+            .skeepy-dashboard-container {
+                min-height: 100vh;
+                display: flex;
+                flex-direction: column;
+            }
+
+            .main-content {
+                flex: 1;
+                padding: 20px;
+                max-width: 100%;
+            }
+
+            /* Mobile Header - Hidden for mobile-first dashboard */
+            .skeepy-mobile-header {
+                display: none;
+            }
+
+            .skeepy-menu-toggle {
+                background: none;
+                border: none;
+                color: #145362;
+                font-size: 1.5rem;
+                cursor: pointer;
+                display: flex;
+                flex-direction: column;
+                gap: 3px;
+            }
+
+            .skeepy-menu-toggle span {
+                display: block;
+                width: 25px;
+                height: 3px;
+                background: #f9edd7;
+                transition: 0.3s;
+            }
+
+            .skeepy-logo img {
+                height: 40px;
+            }
+
+            .skeepy-user-avatar {
+                width: 40px;
+                height: 40px;
+                border-radius: 50%;
+                background: #f9edd7;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                color: #145362;
+                font-weight: 600;
+            }
+
+            /* Sidebar - Hidden on mobile */
+            .skeepy-sidebar {
+                display: none;
+            }
+
+            /* Main Content */
+            .skeepy-main-content {
+                flex: 1;
+                padding: 0;
+                max-width: 100%;
+            }
+
+            .skeepy-content-section {
+                display: none;
+            }
+
+            .skeepy-content-section.active {
+                display: block;
+            }
+
+            /* Greeting section */
+            .greeting-section {
+                margin-top: 24px;
+                margin-bottom: 16px;
+            }
+            
+            .greeting-section h2 {
+                font-size: 24px;
+                font-weight: 600;
+                color: #145362;
+                margin-bottom: 4px;
+                line-height: 1.2;
+            }
+            
+            .greeting-section p {
+                font-size: 14px;
+                color: #6B7280;
+                font-weight: 400;
+            }
+
+            /* Status Info Bar */
+            .status-info {
+                background: white;
+                border-radius: 12px;
+                padding: 16px 20px;
+                margin-bottom: 24px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+                border: 1px solid #E5E7EB;
+            }
+
+            .status-item {
+                display: flex;
+                align-items: center;
+                font-size: 14px;
+                color: #6B7280;
+                font-weight: 400;
+                margin-bottom: 8px;
+            }
+
+            .status-item:last-child {
+                margin-bottom: 0;
+            }
+
+            .status-label {
+                margin-right: 8px;
+            }
+
+            .status-value {
+                font-weight: 600;
+                color: #145362;
+            }
+
+            .status-value.status-approved {
+                color: #059669;
+            }
+
+            .switch-btn {
+                background: transparent;
+                color: #145362;
+                border: none;
+                padding: 0;
+                font-size: 12px;
+                font-weight: 500;
+                cursor: pointer;
+                margin-left: 12px;
+                transition: all 0.2s ease;
+                display: inline-flex;
+                align-items: center;
+                gap: 4px;
+            }
+            
+            .switch-btn i {
+                font-size: 12px;
+                color: #145362;
+                background: #F8FAFC;
+                border-radius: 4px;
+                padding: 4px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: auto;
+                height: auto;
+                line-height: 1;
+            }
+            
+            .switch-btn:hover {
+                opacity: 0.8;
+            }
+
+            .switch-btn:hover {
+                background: #145362;
+                color: white;
+            }
+
+            /* Pet List in Modal */
+            .skeepy-pet-list {
+                display: flex;
+                flex-direction: column;
+                gap: 12px;
+                margin-bottom: 20px;
+            }
+
+            .skeepy-pet-item {
+                display: flex;
+                align-items: center;
+                padding: 12px;
+                border: 1px solid #E5E7EB;
+                border-radius: 8px;
+                cursor: pointer;
+                transition: all 0.2s ease;
+            }
+
+            .skeepy-pet-item:hover {
+                background: #F9FAFB;
+                border-color: #145362;
+            }
+
+            .skeepy-pet-item input[type="radio"] {
+                margin-right: 12px;
+            }
+
+            .skeepy-pet-info {
+                flex: 1;
+            }
+
+            .skeepy-pet-name {
+                font-weight: 600;
+                color: #145362;
+                margin-bottom: 4px;
+            }
+
+            .skeepy-pet-hmo {
+                font-size: 12px;
+                color: #6B7280;
+            }
+
+            /* Status Info */
+            .skeepy-status-info {
+                background: white;
+                border-radius: 12px;
+                padding: 16px 20px;
+                margin-bottom: 24px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+                border: 1px solid #E5E7EB;
+            }
+
+            .skeepy-status-item {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                padding: 8px 0;
+                border-bottom: 1px solid #F3F4F6;
+            }
+
+            .skeepy-status-item:last-child {
+                border-bottom: none;
+            }
+
+            .skeepy-status-label {
+                font-size: 14px;
+                color: #6B7280;
+                font-weight: 500;
+            }
+
+            .skeepy-status-value {
+                font-size: 16px;
+                font-weight: 600;
+                color: #145362;
+                display: flex;
+                align-items: center;
+                gap: 0.5rem;
+            }
+
+            .status-approved {
+                color: #10B981;
+            }
+
+            .skeepy-switch-btn {
+                background: #145362;
+                color: white;
+                border: none;
+                padding: 0.25rem 0.75rem;
+                border-radius: 6px;
+                font-size: 0.875rem;
+                cursor: pointer;
+                transition: all 0.3s ease;
+            }
+
+            .skeepy-switch-btn:hover {
+                background: #1e7490;
+            }
+
+            /* Balance Card */
+            .skeepy-balance-card {
+                background: linear-gradient(135deg, #145362 0%, #0F4A5A 100%);
+                border-radius: 16px;
+                padding: 32px 24px;
+                margin-bottom: 24px;
+                position: relative;
+                overflow: hidden;
+                box-shadow: 0 4px 20px rgba(20, 83, 98, 0.15);
+                width: 100%;
+            }
+            
+            .skeepy-balance-card::before {
+                content: '';
+                position: absolute;
+                top: -50%;
+                right: -20%;
+                width: 100px;
+                height: 100px;
+                background: radial-gradient(circle, rgba(249, 237, 215, 0.08) 0%, transparent 70%);
+                pointer-events: none;
+            }
+
+            .skeepy-balance-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 16px;
+                position: relative;
+                z-index: 2;
+            }
+
+            .balance-label {
+                font-size: 14px;
+                font-weight: 500;
+                color: rgba(255, 255, 255, 0.8);
+            }
+
+            .skeepy-balance-icon {
+                width: 32px;
+                height: 32px;
+                background: rgba(255, 255, 255, 0.15);
+                border: none;
+                border-radius: 8px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 14px;
+                color: white;
+                cursor: pointer;
+                transition: all 0.2s ease;
+            }
+
+            .skeepy-balance-icon:hover {
+                background: rgba(255, 255, 255, 0.2);
+            }
+
+            .skeepy-balance-icon.rotating {
+                animation: rotate 1s linear infinite;
+            }
+
+            @keyframes rotate {
+                from { transform: rotate(0deg); }
+                to { transform: rotate(360deg); }
+            }
+
+            .skeepy-balance-amount {
+                font-size: 36px;
+                font-weight: 700;
+                color: white;
+                line-height: 1;
+                margin-bottom: 12px;
+                position: relative;
+                z-index: 2;
+                letter-spacing: -1px;
+            }
+
+            .skeepy-balance-amount .naira {
+                font-size: 28px;
+                font-weight: 600;
+                margin-right: 2px;
+            }
+
+            .skeepy-balance-subtitle {
+                font-size: 12px;
+                color: rgba(255, 255, 255, 0.7);
+                position: relative;
+                z-index: 2;
+                margin: 0;
+            }
+
+            /* Stats Grid */
+            .skeepy-stats-grid {
+                display: grid;
+                grid-template-columns: 1fr;
+                gap: 16px;
+                margin-bottom: 32px;
+            }
+
+            .skeepy-stat-card {
+                background: white;
+                border-radius: 12px;
+                padding: 20px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+                border: 1px solid #E5E7EB;
+                position: relative;
+                overflow: hidden;
+            }
+
+            .skeepy-stat-card::before {
+                content: '';
+                position: absolute;
+                top: 0;
+                left: 0;
+                right: 0;
+                height: 3px;
+                background: linear-gradient(90deg, #145362 0%, #f9edd7 100%);
+                opacity: 0;
+                transition: opacity 0.3s ease;
+            }
+
+            .skeepy-stat-card:hover::before {
+                opacity: 1;
+            }
+
+            .skeepy-stat-content {
+                display: flex;
+                align-items: center;
+                gap: 16px;
+            }
+
+            .skeepy-stat-icon {
+                width: 44px;
+                height: 44px;
+                border-radius: 12px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 18px;
+                color: white;
+                flex-shrink: 0;
+            }
+
+            .skeepy-stat-icon.pets {
+                background: linear-gradient(135deg, #7C3AED 0%, #8B5CF6 100%);
+            }
+
+            .skeepy-stat-icon.payments {
+                background: linear-gradient(135deg, #059669 0%, #10B981 100%);
+            }
+
+            .skeepy-stat-icon.claims {
+                background: linear-gradient(135deg, #2563EB 0%, #3B82F6 100%);
+            }
+
+            .skeepy-stat-icon.skeepers {
+                background: linear-gradient(135deg, #DC2626 0%, #EF4444 100%);
+            }
+
+            .skeepy-stat-icon.title {
+                background: linear-gradient(135deg, #F59E0B 0%, #FBBF24 100%);
+            }
+
+            .skeepy-stat-info {
+                flex: 1;
+            }
+
+            .skeepy-stat-label {
+                font-size: 14px;
+                color: #6B7280;
+                font-weight: 500;
+                margin-bottom: 8px;
+            }
+
+            .skeepy-stat-number {
+                font-size: 24px;
+                font-weight: 700;
+                color: #145362;
+                line-height: 1;
+            }
+
+            .skeepy-stat-number {
+                font-size: 1.5rem;
+                font-weight: 700;
+                color: #145362;
+            }
+
+            .skeepy-stat-label {
+                font-size: 0.875rem;
+                color: #64748b;
+            }
+
+            /* Quick Access */
+            .skeepy-quick-access {
+                margin-bottom: 32px;
+            }
+
+            .skeepy-quick-access h3 {
+                font-size: 18px;
+                font-weight: 700;
+                color: #145362;
+                margin-bottom: 16px;
+            }
+
+            .skeepy-quick-access-grid {
+                display: grid;
+                grid-template-columns: repeat(2, 1fr);
+                gap: 12px;
+            }
+
+            .skeepy-quick-access-item {
+                background: white;
+                border: 1px solid #E5E7EB;
+                border-radius: 12px;
+                padding: 20px 16px;
+                text-align: center;
+                cursor: pointer;
+                transition: all 0.2s ease;
+                text-decoration: none;
+                color: #374151;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                gap: 8px;
+                height: 84px;
+                justify-content: center;
+            }
+
+            .skeepy-quick-access-item:hover {
+                border-color: #145362;
+                box-shadow: 0 4px 12px rgba(20, 83, 98, 0.1);
+                transform: translateY(-2px);
+            }
+
+            .skeepy-quick-access-icon {
+                font-size: 20px;
+                color: #145362;
+                width: 24px;
+                height: 24px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                background: #F8FAFC;
+                border-radius: 8px;
+                padding: 12px;
+            }
+
+            .skeepy-quick-access-item span {
+                font-size: 12px;
+                font-weight: 600;
+                color: #374151;
+                text-align: center;
+                line-height: 1.2;
+                max-width: 100%;
+                word-wrap: break-word;
+            }
+
+            /* Copy notification */
+            .copy-notification {
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                background: #059669;
+                color: white;
+                padding: 12px 20px;
+                border-radius: 8px;
+                font-size: 14px;
+                font-weight: 500;
+                z-index: 1000;
+                animation: slideIn 0.3s ease-out;
+            }
+
+            @keyframes slideIn {
+                from {
+                    transform: translateX(100%);
+                    opacity: 0;
+                }
+                to {
+                    transform: translateX(0);
+                    opacity: 1;
+                }
+            }
+
+            /* Skeeper Circle Styles */
+            .skeepy-circle-container {
+                display: grid;
+                gap: 2rem;
+            }
+
+            .skeepy-referral-section {
+                background: white;
+                border-radius: 12px;
+                padding: 1.5rem;
+                box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            }
+
+            .skeepy-referral-section h3 {
+                font-size: 1.25rem;
+                font-weight: 600;
+                color: #145362;
+                margin-bottom: 1rem;
+            }
+
+            .skeepy-referral-item {
+                margin-bottom: 1rem;
+            }
+
+            .skeepy-referral-item label {
+                display: block;
+                font-size: 0.875rem;
+                font-weight: 500;
+                color: #374151;
+                margin-bottom: 0.5rem;
+            }
+
+            .skeepy-referral-value {
+                display: flex;
+                align-items: center;
+                gap: 0.5rem;
+                background: #F9FAFB;
+                border: 1px solid #E5E7EB;
+                border-radius: 8px;
+                padding: 0.75rem;
+            }
+
+            .skeepy-referral-value span {
+                flex: 1;
+                font-family: 'Courier New', monospace;
+                color: #145362;
+                font-weight: 500;
+            }
+
+            .skeepy-copy-btn {
+                background: #145362;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 0.5rem;
+                cursor: pointer;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                transition: all 0.2s ease;
+            }
+
+            .skeepy-copy-btn:hover {
+                background: #0F3A44;
+            }
+
+            .skeepy-referrals-section {
+                background: white;
+                border-radius: 12px;
+                padding: 1.5rem;
+                box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            }
+
+            .skeepy-referrals-section h3 {
+                font-size: 1.25rem;
+                font-weight: 600;
+                color: #145362;
+                margin-bottom: 1rem;
+            }
+
+            .skeepy-referrals-table-container {
+                overflow-x: auto;
+                margin-bottom: 1rem;
+            }
+
+            .skeepy-referrals-table {
+                width: 100%;
+                border-collapse: collapse;
+            }
+
+            .skeepy-referrals-table th,
+            .skeepy-referrals-table td {
+                padding: 0.75rem;
+                text-align: left;
+                border-bottom: 1px solid #E5E7EB;
+            }
+
+            .skeepy-referrals-table th {
+                background: #F9FAFB;
+                font-weight: 600;
+                color: #374151;
+            }
+
+            .skeepy-pagination {
+                display: flex;
+                gap: 0.5rem;
+                justify-content: center;
+            }
+
+            .skeepy-page-btn {
+                background: #F9FAFB;
+                border: 1px solid #E5E7EB;
+                border-radius: 6px;
+                padding: 0.5rem 1rem;
+                cursor: pointer;
+                transition: all 0.2s ease;
+                font-size: 0.875rem;
+            }
+
+            .skeepy-page-btn:hover {
+                background: #145362;
+                color: white;
+            }
+
+            .skeepy-page-btn.active {
+                background: #145362;
+                color: white;
+            }
+
+            /* Health Tracker Styles */
+            .skeepy-health-tracker-container {
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                min-height: 300px;
+            }
+
+            .skeepy-coming-soon {
+                text-align: center;
+                background: white;
+                border-radius: 12px;
+                padding: 3rem 2rem;
+                box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+                max-width: 400px;
+            }
+
+            .skeepy-coming-soon-icon {
+                font-size: 3rem;
+                color: #145362;
+                margin-bottom: 1rem;
+            }
+
+            .skeepy-coming-soon h3 {
+                font-size: 1.5rem;
+                font-weight: 600;
+                color: #145362;
+                margin-bottom: 1rem;
+            }
+
+            .skeepy-coming-soon p {
+                color: #6B7280;
+                font-size: 1rem;
+                line-height: 1.5;
+            }
+
+            /* Section Headers */
+            .skeepy-section-header {
+                display: flex;
+                align-items: center;
+                gap: 1rem;
+                margin-bottom: 2rem;
+            }
+
+            .skeepy-back-btn {
+                background: #f1f5f9;
+                border: none;
+                color: #145362;
+                padding: 0.5rem 1rem;
+                border-radius: 8px;
+                cursor: pointer;
+                font-size: 0.875rem;
+                transition: all 0.3s ease;
+            }
+
+            .skeepy-back-btn:hover {
+                background: #e2e8f0;
+            }
+
+            .skeepy-section-header h2 {
+                font-size: 1.875rem;
+                font-weight: 700;
+                color: #145362;
+            }
+
+            /* Profile Section */
+            .skeepy-profile-container {
+                display: grid;
+                gap: 2rem;
+            }
+
+            .skeepy-profile-section {
+                background: white;
+                border-radius: 12px;
+                padding: 1.5rem;
+                box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            }
+
+            .skeepy-profile-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 1rem;
+            }
+
+            .skeepy-profile-header h3 {
+                font-size: 1.125rem;
+                font-weight: 600;
+                color: #145362;
+            }
+
+            .skeepy-edit-btn {
+                background: #145362;
+                color: white;
+                border: none;
+                padding: 0.5rem 1rem;
+                border-radius: 6px;
+                font-size: 0.875rem;
+                cursor: pointer;
+                transition: all 0.3s ease;
+            }
+
+            .skeepy-edit-btn:hover {
+                background: #1e7490;
+            }
+
+            .skeepy-profile-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 1rem;
+            }
+
+            .skeepy-profile-item {
+                display: flex;
+                flex-direction: column;
+                gap: 0.25rem;
+            }
+
+            .skeepy-profile-label {
+                font-size: 0.875rem;
+                color: #64748b;
+                font-weight: 500;
+            }
+
+            .skeepy-profile-value {
+                font-size: 1rem;
+                font-weight: 600;
+                color: #145362;
+            }
+
+            /* Coverage Section */
+            .skeepy-coverage-container {
+                display: grid;
+                gap: 1rem;
+            }
+
+            .skeepy-coverage-item {
+                background: #f8fafc;
+                padding: 1rem;
+                border-radius: 8px;
+                border-left: 4px solid #145362;
+            }
+
+            .skeepy-coverage-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 0.5rem;
+            }
+
+            .skeepy-coverage-name {
+                font-weight: 600;
+                color: #145362;
+            }
+
+            .skeepy-coverage-usage {
+                font-size: 0.875rem;
+                color: #64748b;
+            }
+
+            .skeepy-coverage-bar {
+                height: 6px;
+                background: #e2e8f0;
+                border-radius: 3px;
+                overflow: hidden;
+            }
+
+            .skeepy-coverage-progress {
+                height: 100%;
+                background: linear-gradient(135deg, #145362 0%, #1e7490 100%);
+                transition: width 0.3s ease;
+            }
+
+            /* Visits Section */
+            .skeepy-visits-container {
+                background: white;
+                border-radius: 12px;
+                padding: 1.5rem;
+                box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            }
+
+            .skeepy-filter-section {
+                display: flex;
+                align-items: center;
+                gap: 1rem;
+                margin-bottom: 1.5rem;
+                flex-wrap: wrap;
+            }
+
+            .skeepy-filter-group {
+                display: flex;
+                align-items: center;
+                gap: 0.5rem;
+            }
+
+            .skeepy-filter-group label {
+                font-size: 0.875rem;
+                font-weight: 500;
+                color: #64748b;
+            }
+
+            .skeepy-filter-group select,
+            .skeepy-filter-group input {
+                padding: 0.5rem;
+                border: 1px solid #d1d5db;
+                border-radius: 6px;
+                font-size: 0.875rem;
+            }
+
+            .skeepy-custom-date-range {
+                display: flex;
+                gap: 0.5rem;
+            }
+
+            .skeepy-filter-btn {
+                background: #145362;
+                color: white;
+                border: none;
+                padding: 0.5rem 1rem;
+                border-radius: 6px;
+                font-size: 0.875rem;
+                cursor: pointer;
+                transition: all 0.3s ease;
+            }
+
+            .skeepy-filter-btn:hover {
+                background: #1e7490;
+            }
+
+            .skeepy-visits-table-container {
+                overflow-x: auto;
+            }
+
+            .skeepy-visits-table {
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 1rem;
+            }
+
+            .skeepy-visits-table th,
+            .skeepy-visits-table td {
+                padding: 0.75rem;
+                text-align: left;
+                border-bottom: 1px solid #e2e8f0;
+            }
+
+            .skeepy-visits-table th {
+                background: #f8fafc;
+                font-weight: 600;
+                color: #145362;
+            }
+
+            .skeepy-view-btn {
+                background: #145362;
+                color: white;
+                border: none;
+                padding: 0.25rem 0.75rem;
+                border-radius: 4px;
+                font-size: 0.875rem;
+                cursor: pointer;
+                transition: all 0.3s ease;
+            }
+
+            .skeepy-view-btn:hover {
+                background: #1e7490;
+            }
+
+            /* Support Section */
+            .skeepy-support-container {
+                background: white;
+                border-radius: 12px;
+                padding: 1.5rem;
+                box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            }
+
+            .skeepy-support-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+                gap: 1.5rem;
+            }
+
+            .skeepy-support-item {
+                background: #f8fafc;
+                padding: 1.5rem;
+                border-radius: 8px;
+                text-align: center;
+                border: 1px solid #e2e8f0;
+            }
+
+            .skeepy-support-icon {
+                font-size: 2rem;
+                margin-bottom: 1rem;
+            }
+
+            .skeepy-support-item h3 {
+                font-size: 1.125rem;
+                font-weight: 600;
+                color: #145362;
+                margin-bottom: 0.5rem;
+            }
+
+            .skeepy-support-item p {
+                font-size: 0.875rem;
+                color: #64748b;
+                margin-bottom: 1rem;
+            }
+
+            .skeepy-support-btn {
+                background: #145362;
+                color: white;
+                border: none;
+                padding: 0.5rem 1rem;
+                border-radius: 6px;
+                font-size: 0.875rem;
+                cursor: pointer;
+                transition: all 0.3s ease;
+            }
+
+            .skeepy-support-btn:hover {
+                background: #1e7490;
+            }
+
+            /* Modal Styles */
+            .skeepy-modal {
+                display: none;
+                position: fixed;
+                z-index: 2000;
+                left: 0;
+                top: 0;
+                width: 100%;
+                height: 100%;
+                background: rgba(0, 0, 0, 0.5);
+                backdrop-filter: blur(4px);
+            }
+
+            .skeepy-modal.active {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+
+            .skeepy-modal-content {
+                background: white;
+                border-radius: 12px;
+                width: 90%;
+                max-width: 500px;
+                max-height: 80vh;
+                overflow-y: auto;
+                box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15);
+            }
+
+            .skeepy-modal-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                padding: 1.5rem;
+                border-bottom: 1px solid #e2e8f0;
+            }
+
+            .skeepy-modal-header h3 {
+                font-size: 1.25rem;
+                font-weight: 600;
+                color: #145362;
+            }
+
+            .skeepy-modal-close {
+                background: none;
+                border: none;
+                font-size: 1.5rem;
+                cursor: pointer;
+                color: #64748b;
+                padding: 0.5rem;
+            }
+
+            .skeepy-modal-close:hover {
+                color: #145362;
+            }
+
+            .skeepy-modal-body {
+                padding: 1.5rem;
+            }
+
+            .skeepy-modal-actions {
+                display: flex;
+                gap: 1rem;
+                justify-content: flex-end;
+                margin-top: 1.5rem;
+            }
+
+            .skeepy-btn {
+                padding: 0.75rem 1.5rem;
+                border-radius: 6px;
+                font-size: 0.875rem;
+                font-weight: 500;
+                cursor: pointer;
+                transition: all 0.3s ease;
+                border: none;
+            }
+
+            .skeepy-btn-primary {
+                background: #145362;
+                color: white;
+            }
+
+            .skeepy-btn-primary:hover {
+                background: #1e7490;
+            }
+
+            .skeepy-btn-secondary {
+                background: #f1f5f9;
+                color: #64748b;
+            }
+
+            .skeepy-btn-secondary:hover {
+                background: #e2e8f0;
+            }
+
+            /* Form Styles */
+            .skeepy-form-group {
+                margin-bottom: 1rem;
+            }
+
+            .skeepy-form-group label {
+                display: block;
+                font-size: 0.875rem;
+                font-weight: 500;
+                color: #374151;
+                margin-bottom: 0.5rem;
+            }
+
+            .skeepy-form-group input,
+            .skeepy-form-group select,
+            .skeepy-form-group textarea {
+                width: 100%;
+                padding: 0.75rem;
+                border: 1px solid #d1d5db;
+                border-radius: 6px;
+                font-size: 0.875rem;
+                transition: border-color 0.3s ease;
+            }
+
+            .skeepy-form-group input:focus,
+            .skeepy-form-group select:focus,
+            .skeepy-form-group textarea:focus {
+                outline: none;
+                border-color: #145362;
+                box-shadow: 0 0 0 3px rgba(20, 83, 98, 0.1);
+            }
+
+            .skeepy-form-group textarea {
+                resize: vertical;
+                min-height: 80px;
+            }
+
+            /* Pet List Styles */
+            .skeepy-pet-list {
+                display: grid;
+                gap: 1rem;
+            }
+
+            .skeepy-pet-item {
+                display: flex;
+                align-items: center;
+                gap: 1rem;
+                padding: 1rem;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+                cursor: pointer;
+                transition: all 0.3s ease;
+            }
+
+            .skeepy-pet-item:hover {
+                background: #f8fafc;
+                border-color: #145362;
+            }
+
+            .skeepy-pet-item input[type="radio"] {
+                margin: 0;
+            }
+
+            .skeepy-pet-info {
+                flex: 1;
+            }
+
+            .skeepy-pet-name {
+                font-weight: 600;
+                color: #145362;
+                margin-bottom: 0.25rem;
+            }
+
+            .skeepy-pet-hmo {
+                font-size: 0.875rem;
+                color: #64748b;
+            }
+
+            /* Responsive Design */
+            @media (min-width: 768px) {
+                .skeepy-pet-dashboard {
+                    padding: 32px;
+                }
+                
+                .skeepy-quick-access-grid {
+                    grid-template-columns: repeat(3, 1fr);
+                }
+                
+                .skeepy-stats-grid {
+                    grid-template-columns: repeat(2, 1fr);
+                }
+            }
+
+            @media (min-width: 1024px) {
+                .skeepy-quick-access-grid {
+                    grid-template-columns: repeat(4, 1fr);
+                }
+                
+                .skeepy-stats-grid {
+                    grid-template-columns: repeat(3, 1fr);
+                }
+            }
+
+            /* Loading States */
+            .skeepy-loading {
+                display: inline-block;
+                width: 20px;
+                height: 20px;
+                border: 3px solid #f3f3f3;
+                border-top: 3px solid #145362;
+                border-radius: 50%;
+                animation: spin 1s linear infinite;
+            }
+
+            @keyframes spin {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
+            }
+
+            /* Error States */
+            .skeepy-error {
+                background: #fef2f2;
+                color: #dc2626;
+                padding: 1rem;
+                border-radius: 8px;
+                border-left: 4px solid #dc2626;
+                margin: 1rem 0;
+            }
+
+            .skeepy-success {
+                background: #f0fdf4;
+                color: #16a34a;
+                padding: 1rem;
+                border-radius: 8px;
+                border-left: 4px solid #16a34a;
+                margin: 1rem 0;
+            }
+
+            /* Utility Classes */
+            .skeepy-hidden {
+                display: none !important;
+            }
+
+            .skeepy-text-center {
+                text-align: center;
+            }
+
+            .skeepy-text-right {
+                text-align: right;
+            }
+
+            .skeepy-mt-1 {
+                margin-top: 0.25rem;
+            }
+
+            .skeepy-mt-2 {
+                margin-top: 0.5rem;
+            }
+
+            .skeepy-mb-1 {
+                margin-bottom: 0.25rem;
+            }
+
+            .skeepy-mb-2 {
+                margin-bottom: 0.5rem;
+            }
+            /* CLINIC DASHBOARD EXACT STRUCTURE SUPPORT */
+            .stat-card {
+                background: white;
+                border-radius: 12px;
+                padding: 20px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+                border: 1px solid #E5E7EB;
+                position: relative;
+                overflow: hidden;
+            }
+
+            .stat-card::before {
+                content: '';
+                position: absolute;
+                top: 0;
+                left: 0;
+                right: 0;
+                height: 3px;
+                background: linear-gradient(90deg, #145362 0%, #f9edd7 100%);
+                opacity: 0;
+                transition: opacity 0.3s ease;
+            }
+
+            .stat-card:hover::before {
+                opacity: 1;
+            }
+
+            .stat-top {
+                display: flex;
+                justify-content: flex-start;
+                align-items: center;
+                margin-bottom: 16px;
+            }
+
+            .stat-icon {
+                width: 44px;
+                height: 44px;
+                border-radius: 12px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                margin-right: 16px;
+                font-size: 20px;
+                color: white;
+                position: relative;
+            }
+
+            .stat-icon.payments {
+                background: linear-gradient(135deg, #059669 0%, #10B981 100%);
+            }
+
+            .stat-icon.claims {
+                background: linear-gradient(135deg, #2563EB 0%, #3B82F6 100%);
+            }
+
+            .stat-icon.skeepers {
+                background: linear-gradient(135deg, #DC2626 0%, #EF4444 100%);
+            }
+
+            .stat-title {
+                font-size: 14px;
+                color: #6B7280;
+                font-weight: 500;
+                margin-bottom: 8px;
+            }
+
+            .stat-value {
+                font-size: 24px;
+                font-weight: 700;
+                color: #145362;
+                line-height: 1;
+            }
+
+            /* Support Modal Styles */
+            .support-modal {
+                display: none;
+                position: fixed;
+                z-index: 1000;
+                left: 0;
+                top: 0;
+                width: 100%;
+                height: 100%;
+                background-color: rgba(0,0,0,0.5);
+                animation: fadeIn 0.3s ease-out;
+            }
+
+            .support-modal.active {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+
+            .modal-dialog {
+                background: white;
+                border-radius: 12px;
+                width: 90%;
+                max-width: 400px;
+                position: relative;
+                animation: slideIn 0.3s ease-out;
+            }
+
+            .modal-header {
+                padding: 20px;
+                border-bottom: 1px solid #E5E7EB;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }
+
+            .modal-title {
+                font-size: 18px;
+                font-weight: 600;
+                color: #f9edd7;
+                margin: 0;
+            }
+
+            .modal-close {
+                background: none;
+                border: none;
+                font-size: 20px;
+                cursor: pointer;
+                padding: 0;
+                width: 24px;
+                height: 24px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+
+            .modal-body {
+                padding: 20px;
+            }
+
+            .support-item {
+                display: flex;
+                align-items: center;
+                gap: 16px;
+                padding: 16px;
+                background: #F8FAFC;
+                border-radius: 12px;
+                margin-bottom: 12px;
+                text-decoration: none;
+                color: inherit;
+                transition: all 0.2s ease;
+            }
+
+            .support-item:hover {
+                background: #E2E8F0;
+                transform: translateY(-1px);
+                text-decoration: none;
+                color: inherit;
+            }
+
+            .support-item:last-child {
+                margin-bottom: 0;
+            }
+
+            .support-modal .support-item i {
+                width: 40px;
+                height: 40px;
+                background: #145362 !important;
+                color: white !important;
+                border-radius: 10px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 18px;
+                transition: all 0.2s ease;
+                margin-right: 0 !important;
+            }
+            
+            .support-modal .support-item:hover i {
+                background: #0F4A5A !important;
+            }
+
+            .support-text {
+                flex: 1;
+            }
+
+            .support-label {
+                font-size: 14px;
+                color: #6B7280;
+                font-weight: 500;
+                margin-bottom: 2px;
+            }
+
+            .support-value {
+                font-size: 16px;
+                color: #145362;
+                font-weight: 600;
+            }
+
+            .benefit-item {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                padding: 12px 15px;
+                margin: 8px 0;
+                border-radius: 8px;
+                border-left: 4px solid #E5E7EB;
+                background: #F9FAFB;
+            }
+
+            .benefit-item.benefit-available {
+                border-left-color: #10B981;
+                background: #ECFDF5;
+            }
+
+            .benefit-item.benefit-waiting {
+            }
+
+            .info-card {
+                background: white;
+                border-radius: 12px;
+                padding: 20px;
+                margin-bottom: 20px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+                border: 1px solid #E5E7EB;
+            }
+
+            .info-card h3 {
+                margin: 0 0 20px 0;
+                color: #145362;
+                font-size: 18px;
+                font-weight: 600;
+                display: flex;
+                align-items: center;
+                gap: 10px;
+            }
+
+            .info-item {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                padding: 12px 0;
+                border-bottom: 1px solid #F3F4F6;
+            }
+
+            .info-item:last-child {
+                border-bottom: none;
+            }
+
+            .info-item span:first-child {
+                font-weight: 500;
+                color: #374151;
+            }
+
+            .info-item span:last-child {
+                color: #145362;
+                font-weight: 600;
+                border-left-color: #F59E0B;
+                background: #FFFBEB;
+                font-size: 16px;
+                font-weight: 600;
+                color: #145362;
+            }
+
+            @keyframes fadeIn {
+                from { opacity: 0; }
+                to { opacity: 1; }
+            }
+
+            @keyframes slideIn {
+                from { transform: translateY(-20px); opacity: 0; }
+                to { transform: translateY(0); opacity: 1; }
+            }
+
+        </style>
+
+        <script>
+            // Global variables
+            let skeepy_current_pet = null;
+            let skeepy_all_pets = [];
+            let skeepy_selected_pet_radio = null;
+
+            // Initialize dashboard
+            document.addEventListener('DOMContentLoaded', function() {
+                skeepy_init_dashboard();
+                skeepy_load_dashboard_data();
+            });
+
+            // Initialize dashboard functionality
+            function skeepy_init_dashboard() {
+                // Mobile menu toggle
+                const menuToggle = document.getElementById('skeepy-menu-toggle');
+                const sidebar = document.getElementById('skeepy-sidebar');
+                
+                if (menuToggle && sidebar) {
+                    menuToggle.addEventListener('click', function() {
+                        sidebar.classList.toggle('active');
+                    });
+                }
+
+                // Menu item clicks
+                document.querySelectorAll('.skeepy-menu-item').forEach(item => {
+                    item.addEventListener('click', function(e) {
+                        e.preventDefault();
+                        const section = this.dataset.section;
+                        if (section) {
+                            skeepy_show_section(section);
+                        }
+                    });
+                });
+
+                // Quick access clicks
+                document.querySelectorAll('.skeepy-quick-access-item').forEach(item => {
+                    item.addEventListener("click", function() {
+                        const section = this.dataset.section;
+                        if (section === "support") {
+                            showSupportModal();
+                        } else if (section === "logout" || this.id === "signout-access") {
+                            showSignOutModal();
+                        } else if (section === "coverage") {
+                            skeepy_show_section("coverage");
+                            skeepy_load_coverage_data();
+                        } else if (section === "skeeper-circle") {
+                            skeepy_show_section("skeeper-circle");
+                            skeepy_load_skeeper_circle_data();
+                        } else if (section === "health-tracker") {
+                            skeepy_show_section("health-tracker");
+                        } else if (section) {
+                            skeepy_show_section(section);
+                        }
+                    });
+                });
+
+                // Back button clicks
+                document.querySelectorAll('.skeepy-back-btn').forEach(btn => {
+                    btn.addEventListener('click', function() {
+                        const target = this.dataset.target;
+                        if (target) {
+                            skeepy_show_section(target);
+                        }
+                    });
+                });
+
+                // Switch pet buttons (both in status and stat card)
+                const switchBtn = document.getElementById('switch-pet-btn');
+                const switchBtnStat = document.getElementById('switch-pet-btn-stat');
+                if (switchBtn) {
+                    switchBtn.addEventListener('click', function() {
+                        skeepy_show_switch_pet_modal();
+                    });
+                }
+                if (switchBtnStat) {
+                    switchBtnStat.addEventListener('click', function() {
+                        skeepy_show_switch_pet_modal();
+                    });
+                }
+
+                // Edit guardian button
+                const editGuardianBtn = document.getElementById('edit-guardian-btn');
+                if (editGuardianBtn) {
+                    editGuardianBtn.addEventListener('click', function() {
+                        skeepy_show_edit_guardian_modal();
+                    });
+                }
+
+                // Sign out handlers
+                document.getElementById('skeepy-signout')?.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    skeepy_show_modal('signout-modal');
+                });
+
+                document.getElementById('signout-access')?.addEventListener('click', function() {
+                    skeepy_show_modal('signout-modal');
+                });
+
+                // Edit guardian form submission
+                document.getElementById('edit-guardian-form')?.addEventListener('submit', function(e) {
+                    e.preventDefault();
+                    skeepy_update_guardian_info();
+                });
+
+                // Date filter change
+                document.getElementById('date-filter')?.addEventListener('change', function() {
+                    const customRange = document.getElementById('custom-date-range');
+                    if (this.value === 'custom') {
+                        customRange.style.display = 'flex';
+                    } else {
+                        customRange.style.display = 'none';
+                    }
+                });
+
+                // Apply filter button
+                document.getElementById('apply-filter')?.addEventListener('click', function() {
+                    skeepy_load_vet_visits();
+                });
+
+                // Set greeting
+                skeepy_set_greeting();
+                
+                // Update greeting on page load
+                updateGreeting();
+            }
+
+            // Show section
+            function skeepy_show_section(sectionName) {
+                // Hide all sections
+                document.querySelectorAll('.skeepy-content-section').forEach(section => {
+                    section.classList.remove('active');
+                });
+
+                // Show target section
+                const targetSection = document.getElementById(sectionName + '-section');
+                if (targetSection) {
+                    targetSection.classList.add('active');
+                }
+
+                // Update menu active state
+                document.querySelectorAll('.skeepy-menu-item').forEach(item => {
+                    item.classList.remove('active');
+                });
+
+                const activeMenuItem = document.querySelector(`[data-section="${sectionName}"]`);
+                if (activeMenuItem && activeMenuItem.classList.contains('skeepy-menu-item')) {
+                    activeMenuItem.classList.add('active');
+                }
+
+                // Load section-specific data
+                if (sectionName === 'profile') {
+                    skeepy_load_profile_data();
+                } else if (sectionName === 'visits') {
+                    skeepy_load_vet_visits();
+                }
+
+                // Close sidebar on mobile
+                if (window.innerWidth <= 768) {
+                    document.getElementById('skeepy-sidebar')?.classList.remove('active');
+                }
+            }
+
+            // Update greeting based on user's local timezone
+            function updateGreeting() {
+                const now = new Date();
+                const hour = now.getHours();
+                let greeting;
+                
+                if (hour >= 0 && hour < 12) {
+                    greeting = 'Good Morning';
+                } else if (hour >= 12 && hour < 17) {
+                    greeting = 'Good Afternoon';
+                } else {
+                    greeting = 'Good Evening';
+                }
+                
+                const greetingElement = document.querySelector('.greeting-section h2');
+                if (greetingElement) {
+                    const currentText = greetingElement.textContent;
+                    const name = currentText.replace(/^(Good Morning|Good Afternoon|Good Evening),?\s*/, '');
+                    greetingElement.textContent = greeting + ', ' + name;
+                }
+            }
+            
+            // Set greeting based on time
+            function skeepy_set_greeting() {
+                updateGreeting();
+            }
+
+            // Load dashboard data
+            function skeepy_load_dashboard_data() {
+                // Remove nonce dependency - server will authenticate via user login
+                fetch('<?php echo admin_url('admin-ajax.php'); ?>', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: 'action=skeepy_pet_dashboard_data'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        skeepy_current_pet = data.data.current_pet;
+                        skeepy_all_pets = data.data.all_pets;
+                        skeepy_update_dashboard_ui(data.data);
+                    } else {
+                        console.error('Failed to load dashboard data:', data.data);
+                        // Show error message to user
+                        if (data.data === 'User not logged in') {
+                            // Redirect to login page
+                            window.location.href = '/pet-login';
+                        }
+                    }
+                })
+                .catch(error => {
+                    console.error('Error loading dashboard data:', error);
+                });
+            }
+
+            // Update dashboard UI
+            function skeepy_update_dashboard_ui(data) {
+                // Update pet name
+                document.getElementById('current-pet-name').textContent = data.current_pet.pet_name;
+                
+                // Update greeting with guardian's first name
+                const greetingElement = document.querySelector('.greeting-section h2');
+                if (greetingElement) {
+                    const now = new Date();
+                    const hour = now.getHours();
+                    let greeting;
+                    
+                    if (hour >= 0 && hour < 12) {
+                        greeting = 'Good Morning';
+                    } else if (hour >= 12 && hour < 17) {
+                        greeting = 'Good Afternoon';
+                    } else {
+                        greeting = 'Good Evening';
+                    }
+                    
+                    const guardianFirstName = data.current_pet.guardian_first_name || data.current_pet.guardian_name || 'Guardian';
+                    greetingElement.textContent = greeting + ', ' + guardianFirstName + '!';
+                }
+                
+                // Update status info - capitalize first letter
+                const status = data.current_pet.plan_status || 'Active';
+                document.getElementById('account-status').textContent = status.charAt(0).toUpperCase() + status.slice(1).toLowerCase();
+                document.getElementById('current-hmo-id').textContent = data.current_pet.hmo_id;
+                
+                // Show/hide switch buttons (both in status and stat card)
+                const switchBtn = document.getElementById('switch-pet-btn');
+                const switchBtnStat = document.getElementById('switch-pet-btn-stat');
+                if (data.all_pets.length > 1) {
+                    if (switchBtn) switchBtn.style.display = 'inline-flex';
+                    if (switchBtnStat) switchBtnStat.style.display = 'inline-flex';
+                } else {
+                    if (switchBtn) switchBtn.style.display = 'none';
+                    if (switchBtnStat) switchBtnStat.style.display = 'none';
+                }
+
+                // Update statistics
+                document.getElementById('amount-paid-out').textContent = '₦' + skeepy_format_number(data.statistics.amount_paid_out);
+                
+                // Calculate plan streak from registration date
+                const registrationDate = new Date(data.current_pet.registration_date);
+                const monthsSince = Math.floor((Date.now() - registrationDate.getTime()) / (30 * 24 * 60 * 60 * 1000));
+                const planStreak = Math.max(1, monthsSince) + ' Month' + (monthsSince > 1 ? 's' : '');
+                
+                // Update all 5 stat cards
+                document.getElementById('number-of-pets').textContent = data.all_pets.length;
+                document.getElementById('plan-streak').textContent = planStreak;
+                document.getElementById('total-vet-visits').textContent = data.statistics.vet_visits_count || '0';
+                document.getElementById('skeepers-from-me').textContent = data.statistics.skeepers_from_me || '0';
+                document.getElementById('skeeper-title').textContent = 'Rookie'; // Default title
+            }
+
+            // Format number with commas
+            function skeepy_format_number(num) {
+                if (num === 0) {
+                    return '0.00';
+                }
+                return new Intl.NumberFormat('en-NG').format(num);
+            }
+
+            // Refresh amount paid out
+            function refreshAmountPaidOut() {
+                const refreshBtn = document.getElementById('refresh-icon');
+                refreshBtn.classList.add('rotating');
+                
+                fetch('<?php echo admin_url('admin-ajax.php'); ?>', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: 'action=skeepy_get_amount_paid_out'
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        const amount = data.data.amount_paid_out;
+                        document.getElementById('amount-paid-out').textContent = '₦' + skeepy_format_number(amount);
+                        document.querySelector('.skeepy-balance-subtitle').textContent = 'Updated just now';
+                    } else {
+                        console.error('Failed to refresh amount paid out:', data.data);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error refreshing amount paid out:', error);
+                })
+                .finally(() => {
+                    refreshBtn.classList.remove('rotating');
+                });
+            }
+
+            // Show switch pet modal
+            function skeepy_show_switch_pet_modal() {
+                const container = document.getElementById('pet-list-container');
+                container.innerHTML = '';
+
+                skeepy_all_pets.forEach(pet => {
+                    const petItem = document.createElement('div');
+                    petItem.className = 'skeepy-pet-item';
+                    petItem.innerHTML = `
+                        <input type="radio" name="selected_pet" value="${pet.hmo_id}" ${pet.hmo_id === skeepy_current_pet.hmo_id ? 'checked' : ''}>
+                        <div class="skeepy-pet-info">
+                            <div class="skeepy-pet-name">${pet.pet_name}</div>
+                            <div class="skeepy-pet-hmo">${pet.hmo_id}</div>
+                        </div>
+                    `;
+                    
+                    petItem.addEventListener('click', function() {
+                        petItem.querySelector('input[type="radio"]').checked = true;
+                        skeepy_selected_pet_radio = pet.hmo_id;
+                    });
+                    
+                    container.appendChild(petItem);
+                });
+
+                skeepy_show_modal('switch-pet-modal');
+            }
+
+            // Switch pet account
+            function skeepy_switch_pet() {
+                const selectedRadio = document.querySelector('input[name="selected_pet"]:checked');
+                if (!selectedRadio) {
+                    alert('Please select a pet to switch to.');
+                    return;
+                }
+
+                const selectedHmoId = selectedRadio.value;
+                if (selectedHmoId === skeepy_current_pet.hmo_id) {
+                    skeepy_close_modal('switch-pet-modal');
+                    return;
+                }
+
+                fetch('<?php echo admin_url('admin-ajax.php'); ?>', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `action=skeepy_switch_pet&hmo_id=${selectedHmoId}`
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        skeepy_close_modal('switch-pet-modal');
+                        // Refresh the entire dashboard to load new pet data
+                        window.location.reload();
+                    } else {
+                        alert('Failed to switch pet account: ' + data.data);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error switching pet:', error);
+                    alert('An error occurred while switching pet account.');
+                });
+            }
+
+            // Load profile data
+            function skeepy_load_profile_data() {
+                if (!skeepy_current_pet) return;
+
+                // Pet Information
+                const petInfoGrid = document.getElementById('pet-info-grid');
+                petInfoGrid.innerHTML = `
+                    <div class="skeepy-profile-item">
+                        <div class="skeepy-profile-label">Pet Name</div>
+                        <div class="skeepy-profile-value">${skeepy_current_pet.pet_name}</div>
+                    </div>
+                    <div class="skeepy-profile-item">
+                        <div class="skeepy-profile-label">Pet Type</div>
+                        <div class="skeepy-profile-value">${skeepy_current_pet.pet_type}</div>
+                    </div>
+                    <div class="skeepy-profile-item">
+                        <div class="skeepy-profile-label">Breed</div>
+                        <div class="skeepy-profile-value">${skeepy_current_pet.pet_breed}</div>
+                    </div>
+                    <div class="skeepy-profile-item">
+                        <div class="skeepy-profile-label">Gender</div>
+                        <div class="skeepy-profile-value">${skeepy_current_pet.pet_gender}</div>
+                    </div>
+                    <div class="skeepy-profile-item">
+                        <div class="skeepy-profile-label">Age</div>
+                        <div class="skeepy-profile-value">${skeepy_current_pet.pet_age} years</div>
+                    </div>
+                    <div class="skeepy-profile-item">
+                        <div class="skeepy-profile-label">Color</div>
+                        <div class="skeepy-profile-value">${skeepy_current_pet.pet_color}</div>
+                    </div>
+                    <div class="skeepy-profile-item">
+                        <div class="skeepy-profile-label">HMO ID</div>
+                        <div class="skeepy-profile-value">${skeepy_current_pet.hmo_id}</div>
+                    </div>
+                `;
+
+                // Guardian Information
+                const guardianInfoGrid = document.getElementById('guardian-info-grid');
+                guardianInfoGrid.innerHTML = `
+                    <div class="skeepy-profile-item">
+                        <div class="skeepy-profile-label">First Name</div>
+                        <div class="skeepy-profile-value">${skeepy_current_pet.guardian_first_name}</div>
+                    </div>
+                    <div class="skeepy-profile-item">
+                        <div class="skeepy-profile-label">Surname</div>
+                        <div class="skeepy-profile-value">${skeepy_current_pet.guardian_surname}</div>
+                    </div>
+                    <div class="skeepy-profile-item">
+                        <div class="skeepy-profile-label">Email</div>
+                        <div class="skeepy-profile-value">${skeepy_current_pet.guardian_email}</div>
+                    </div>
+                    <div class="skeepy-profile-item">
+                        <div class="skeepy-profile-label">Phone</div>
+                        <div class="skeepy-profile-value">${skeepy_current_pet.guardian_phone}</div>
+                    </div>
+                    <div class="skeepy-profile-item">
+                        <div class="skeepy-profile-label">Address</div>
+                        <div class="skeepy-profile-value">${skeepy_current_pet.guardian_address}</div>
+                    </div>
+                    <div class="skeepy-profile-item">
+                        <div class="skeepy-profile-label">State</div>
+                        <div class="skeepy-profile-value">${skeepy_current_pet.guardian_state}</div>
+                    </div>
+                `;
+
+                // Plan Information
+                const planInfoGrid = document.getElementById('plan-info-grid');
+                planInfoGrid.innerHTML = `
+                    <div class="skeepy-profile-item">
+                        <div class="skeepy-profile-label">Plan Type</div>
+                        <div class="skeepy-profile-value">${skeepy_current_pet.plan_type}</div>
+                    </div>
+                    <div class="skeepy-profile-item">
+                        <div class="skeepy-profile-label">Plan Duration</div>
+                        <div class="skeepy-profile-value">${skeepy_current_pet.plan_duration}</div>
+                    </div>
+                    <div class="skeepy-profile-item">
+                        <div class="skeepy-profile-label">Monthly Fee</div>
+                        <div class="skeepy-profile-value">₦${skeepy_format_number(skeepy_current_pet.monthly_fee)}</div>
+                    </div>
+                    <div class="skeepy-profile-item">
+                        <div class="skeepy-profile-label">Coverage Limit</div>
+                        <div class="skeepy-profile-value">₦${skeepy_format_number(skeepy_current_pet.coverage_limit)}</div>
+                    </div>
+                    <div class="skeepy-profile-item">
+                        <div class="skeepy-profile-label">Plan Status</div>
+                        <div class="skeepy-profile-value">${skeepy_current_pet.plan_status || 'Active'}</div>
+                    </div>
+                    <div class="skeepy-profile-item">
+                        <div class="skeepy-profile-label">Registration Date</div>
+                        <div class="skeepy-profile-value">${new Date(skeepy_current_pet.registration_date).toLocaleDateString()}</div>
+                    </div>
+                `;
+
+                // Load coverage data
+                skeepy_load_coverage_data();
+            }
+
+            // Load coverage data
+            function skeepy_load_coverage_data() {
+                // This would typically fetch coverage data from the server
+                // For now, we'll show a placeholder
+                const coverageContainer = document.getElementById('coverage-container');
+                coverageContainer.innerHTML = `
+                    <div class="skeepy-coverage-item">
+                        <div class="skeepy-coverage-header">
+                            <div class="skeepy-coverage-name">Annual Coverage</div>
+                            <div class="skeepy-coverage-usage">Used: ₦0 / ₦${skeepy_format_number(skeepy_current_pet.coverage_limit)}</div>
+                        </div>
+                        <div class="skeepy-coverage-bar">
+                            <div class="skeepy-coverage-progress" style="width: 0%"></div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            // Show edit guardian modal
+            function skeepy_show_edit_guardian_modal() {
+                if (!skeepy_current_pet) return;
+
+                // Populate form with current data
+                document.getElementById('edit-first-name').value = skeepy_current_pet.guardian_first_name;
+                document.getElementById('edit-surname').value = skeepy_current_pet.guardian_surname;
+                document.getElementById('edit-phone').value = skeepy_current_pet.guardian_phone;
+                document.getElementById('edit-address').value = skeepy_current_pet.guardian_address;
+                document.getElementById('edit-state').value = skeepy_current_pet.guardian_state;
+
+                skeepy_show_modal('edit-guardian-modal');
+            }
+
+            // Update guardian information
+            function skeepy_update_guardian_info() {
+                const formData = new FormData(document.getElementById('edit-guardian-form'));
+                formData.append('action', 'skeepy_update_guardian_info');
+                // Remove nonce dependency - server will authenticate via user login
+
+                fetch('<?php echo admin_url('admin-ajax.php'); ?>', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        skeepy_close_modal('edit-guardian-modal');
+                        skeepy_load_dashboard_data();
+                        skeepy_load_profile_data();
+                        alert('Guardian information updated successfully!');
+                    } else {
+                        alert('Failed to update guardian information: ' + data.data);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error updating guardian info:', error);
+                    alert('An error occurred while updating guardian information.');
+                });
+            }
+
+            // Load vet visits
+            function skeepy_load_vet_visits() {
+                const dateFilter = document.getElementById('date-filter').value;
+                const startDate = document.getElementById('start-date').value;
+                const endDate = document.getElementById('end-date').value;
+
+                fetch('<?php echo admin_url('admin-ajax.php'); ?>', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `action=skeepy_get_vet_visits&date_filter=${dateFilter}&start_date=${startDate}&end_date=${endDate}`
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        skeepy_populate_visits_table(data.data);
+                    } else {
+                        console.error('Failed to load vet visits:', data.data);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error loading vet visits:', error);
+                });
+            }
+
+            // Populate visits table
+            function skeepy_populate_visits_table(visits) {
+                const tbody = document.getElementById('visits-table-body');
+                tbody.innerHTML = '';
+
+                if (visits.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="3" class="skeepy-text-center">No vet visits found</td></tr>';
+                    return;
+                }
+
+                visits.forEach(visit => {
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td>${new Date(visit.treatment_date).toLocaleDateString()}</td>
+                        <td>${visit.claim_id}</td>
+                        <td><button class="skeepy-view-btn" onclick="skeepy_view_claim_details('${visit.claim_id}')">View</button></td>
+                    `;
+                    tbody.appendChild(row);
+                });
+            }
+
+            // View claim details
+            function skeepy_view_claim_details(claimId) {
+                fetch('<?php echo admin_url('admin-ajax.php'); ?>', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `action=skeepy_get_claim_details&claim_id=${claimId}`
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        skeepy_show_claim_details(data.data);
+                    } else {
+                        alert('Failed to load claim details: ' + data.data);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error loading claim details:', error);
+                    alert('An error occurred while loading claim details.');
+                });
+            }
+
+            // Show claim details
+            function skeepy_show_claim_details(claim) {
+                const container = document.getElementById('claim-details-content');
+                container.innerHTML = `
+                    <div class="skeepy-profile-grid">
+                        <div class="skeepy-profile-item">
+                            <div class="skeepy-profile-label">Claim ID</div>
+                            <div class="skeepy-profile-value">${claim.claim_id}</div>
+                        </div>
+                        <div class="skeepy-profile-item">
+                            <div class="skeepy-profile-label">Clinic Name</div>
+                            <div class="skeepy-profile-value">${claim.clinic_name}</div>
+                        </div>
+                        <div class="skeepy-profile-item">
+                            <div class="skeepy-profile-label">Veterinarian</div>
+                            <div class="skeepy-profile-value">${claim.veterinarian_name}</div>
+                        </div>
+                        <div class="skeepy-profile-item">
+                            <div class="skeepy-profile-label">Treatment Date</div>
+                            <div class="skeepy-profile-value">${new Date(claim.treatment_date).toLocaleDateString()}</div>
+                        </div>
+                        <div class="skeepy-profile-item">
+                            <div class="skeepy-profile-label">Status</div>
+                            <div class="skeepy-profile-value">${claim.status}</div>
+                        </div>
+                        <div class="skeepy-profile-item">
+                            <div class="skeepy-profile-label">Total Amount</div>
+                            <div class="skeepy-profile-value">₦${skeepy_format_number(claim.total_amount)}</div>
+                        </div>
+                    </div>
+                    <div class="skeepy-profile-section">
+                        <h4>Symptoms</h4>
+                        <p>${claim.symptoms}</p>
+                    </div>
+                    <div class="skeepy-profile-section">
+                        <h4>Diagnosis</h4>
+                        <p>${claim.diagnosis}</p>
+                    </div>
+                    <div class="skeepy-profile-section">
+                        <h4>Treatment</h4>
+                        <p>${claim.treatment}</p>
+                    </div>
+                    <div class="skeepy-profile-section">
+                        <h4>Services</h4>
+                        <p>${claim.services}</p>
+                    </div>
+                `;
+
+                skeepy_show_modal('claim-details-modal');
+            }
+
+            // Support functions
+            function skeepy_open_chat() {
+                // Implement live chat functionality
+                alert('Live chat feature will be implemented soon!');
+            }
+
+            function skeepy_open_email() {
+                window.location.href = 'mailto:support@skeepy.co?subject=Pet Dashboard Support Request';
+            }
+
+            function skeepy_open_phone() {
+                window.location.href = 'tel:+234123456789';
+            }
+
+            // Modal functions
+            function skeepy_show_modal(modalId) {
+                const modal = document.getElementById(modalId);
+                if (modal) {
+                    modal.classList.add('active');
+                }
+            }
+
+            function skeepy_close_modal(modalId) {
+                const modal = document.getElementById(modalId);
+                if (modal) {
+                    modal.classList.remove('active');
+                }
+            }
+
+            // Logout functions
+            function skeepy_confirm_logout() {
+                console.log('skeepy_confirm_logout called');
+                
+                // Close modal immediately
+                skeepy_close_modal('signout-modal');
+                
+                // Direct logout using AJAX then redirect
+                fetch('<?php echo admin_url("admin-ajax.php"); ?>', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: new URLSearchParams({
+                        'action': 'skeepy_pet_logout',
+                        'nonce': '<?php echo wp_create_nonce("skeepy_pet_logout_nonce"); ?>' // Keep nonce for logout security
+                    })
+                })
+                .then(() => {
+                    // Redirect immediately after logout
+                    window.location.href = '/pet-login';
+                })
+                .catch(() => {
+                    // Fallback redirect
+                    window.location.href = '/pet-login';
+                });
+            }
+
+            // Skeeper Circle Functions
+            function skeepy_load_skeeper_circle_data() {
+                // Generate referral code (6 characters starting with SK)
+                const referralCode = generateReferralCode();
+                document.getElementById('referral-code').textContent = referralCode;
+                
+                // Generate referral URL
+                const referralUrl = `https://www.skeepy.co/pet-signup?ref=${referralCode}`;
+                document.getElementById('referral-url').textContent = referralUrl;
+                
+                // Load referrals (start with page 1)
+                loadReferrals(1);
+            }
+
+            function generateReferralCode() {
+                // Generate 4 random characters after SK
+                const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+                let result = 'SK';
+                for (let i = 0; i < 4; i++) {
+                    result += chars.charAt(Math.floor(Math.random() * chars.length));
+                }
+                return result;
+            }
+
+            function copyReferralCode() {
+                const code = document.getElementById('referral-code').textContent;
+                navigator.clipboard.writeText(code).then(() => {
+                    showCopyNotification('Referral code copied!');
+                });
+            }
+
+            function copyReferralURL() {
+                const url = document.getElementById('referral-url').textContent;
+                navigator.clipboard.writeText(url).then(() => {
+                    showCopyNotification('Referral URL copied!');
+                });
+            }
+
+            function showCopyNotification(message) {
+                const notification = document.createElement('div');
+                notification.className = 'copy-notification';
+                notification.textContent = message;
+                document.body.appendChild(notification);
+                
+                setTimeout(() => {
+                    notification.remove();
+                }, 3000);
+            }
+
+            function loadReferrals(page) {
+                const tbody = document.getElementById('referrals-table-body');
+                tbody.innerHTML = '<tr><td colspan="2" style="text-align: center;">No referrals yet</td></tr>';
+                
+                // Update pagination buttons
+                document.querySelectorAll('.skeepy-page-btn').forEach(btn => {
+                    btn.classList.remove('active');
+                });
+                
+                const currentBtn = document.querySelector(`[onclick="loadReferrals(${page})"]`);
+                if (currentBtn) {
+                    currentBtn.classList.add('active');
+                }
+            }
+
+            // Close modal when clicking outside
+            document.addEventListener('click', function(e) {
+                if (e.target.classList.contains('skeepy-modal')) {
+                    e.target.classList.remove('active');
+                }
+            });
+
+            // Keyboard navigation
+            document.addEventListener('keydown', function(e) {
+                if (e.key === 'Escape') {
+                    document.querySelectorAll('.skeepy-modal.active').forEach(modal => {
+                        modal.classList.remove('active');
+                    });
+                }
+            });
+        </script>
+    </div>
+    <?php
+    return ob_get_clean();
+}
+
+// ========================================
+// AJAX HANDLERS
+// ========================================
+
+// Dashboard data handler
+function skeepy_pet_dashboard_data_handler() {
+    // More flexible authentication check - prioritize user login over nonce
+    if (!is_user_logged_in()) {
+        wp_send_json_error('User not logged in');
+        return;
+    }
+
+    // Check nonce only if present - allows fresh login sessions to work
+    if (isset($_POST['security']) && !wp_verify_nonce($_POST['security'], 'skeepy_pet_dashboard')) {
+        wp_send_json_error('Security check failed');
+        return;
+    }
+
+    $current_user = wp_get_current_user();
+    if (!in_array('skeepy_pet_parent', $current_user->roles)) {
+        wp_send_json_error('Access denied');
+        return;
+    }
+
+    global $wpdb;
+    $pets_table = $wpdb->prefix . 'skeepy_pets';
+    $claims_table = $wpdb->prefix . 'skeepy_claims';
+
+    // Get all pets for this user (by email)
+    $all_pets = $wpdb->get_results($wpdb->prepare(
+        "SELECT * FROM $pets_table WHERE guardian_email = %s ORDER BY registration_date DESC",
+        $current_user->user_email
+    ));
+
+    if (empty($all_pets)) {
+        wp_send_json_error('No pets found for this account');
+        return;
+    }
+
+    // Get current pet (first one or from session)
+    session_start();
+    $current_pet = $all_pets[0];
+    if (isset($_SESSION['skeepy_current_pet_hmo'])) {
+        foreach ($all_pets as $pet) {
+            if ($pet->hmo_id === $_SESSION['skeepy_current_pet_hmo']) {
+                $current_pet = $pet;
+                break;
+            }
+        }
+    }
+
+    // Calculate statistics for current pet
+    $current_year = date('Y');
+    
+    // Amount paid out (undiscounted amount from approved claims)
+    $amount_paid_out = $wpdb->get_var($wpdb->prepare(
+        "SELECT SUM(
+            CAST(REPLACE(REPLACE(REPLACE(total_amount, '₦', ''), ',', ''), ' ', '') AS DECIMAL(10,2)) / 
+            (1 - (
+                CASE 
+                    WHEN services LIKE '%General Consultation%' OR services LIKE '%Premium Grooming%' OR services LIKE '%Basic Grooming%' OR services LIKE '%Dental Cleaning%' OR services LIKE '%Comprehensive Physical Exam%' OR services LIKE '%Basic Blood Work%' OR services LIKE '%Wound Repair%' OR services LIKE '%Tail Removal%' OR services LIKE '%Other Surgeries%' OR services LIKE '%Pet Boarding%' OR services LIKE '%Emergency Boarding Support%' OR services LIKE '%Pet Sitting%' THEN 0.15
+                    WHEN services LIKE '%Routine Medication%' OR services LIKE '%Chronic Disease Medication%' OR services LIKE '%Supplements Prescribed%' THEN 0.00
+                    ELSE 0.10
+                END
+            ))
+        ) 
+        FROM $claims_table 
+        WHERE patient_hmo_id = %s 
+        AND status IN ('approved', 'paid') 
+        AND YEAR(submission_date) = %d",
+        $current_pet->hmo_id,
+        $current_year
+    )) ?: 0;
+
+    // Vet visits count
+    $vet_visits_count = $wpdb->get_var($wpdb->prepare(
+        "SELECT COUNT(*) FROM $claims_table WHERE patient_hmo_id = %s",
+        $current_pet->hmo_id
+    )) ?: 0;
+
+    // Skeepers from me (referrals - placeholder for now)
+    $skeepers_from_me = 0; // Will be implemented with referral tracking
+
+    // Calculate total savings (plan fees paid minus benefits used)
+    $monthly_fee = floatval($current_pet->monthly_fee);
+    $months_active = 12; // Assuming annual calculation
+    $total_fees_paid = $monthly_fee * $months_active;
+    $total_savings = max(0, $total_fees_paid - $amount_paid_out);
+
+    $statistics = [
+        'amount_paid_out' => $amount_paid_out,
+        'total_savings' => $total_savings,
+        'vet_visits_count' => $vet_visits_count,
+        'total_pets' => count($all_pets),
+        'skeepers_from_me' => $skeepers_from_me
+    ];
+
+    wp_send_json_success([
+        'current_pet' => $current_pet,
+        'all_pets' => $all_pets,
+        'statistics' => $statistics
+    ]);
+}
+
+// Switch pet handler
+function skeepy_switch_pet_handler() {
+    // More flexible authentication check - prioritize user login over nonce
+    if (!is_user_logged_in()) {
+        wp_send_json_error('User not logged in');
+        return;
+    }
+
+    // Check nonce only if present - allows fresh login sessions to work
+    if (isset($_POST['security']) && !wp_verify_nonce($_POST['security'], 'skeepy_switch_pet')) {
+        wp_send_json_error('Security check failed');
+        return;
+    }
+
+    $hmo_id = sanitize_text_field($_POST['hmo_id']);
+    $current_user = wp_get_current_user();
+
+    global $wpdb;
+    $pets_table = $wpdb->prefix . 'skeepy_pets';
+
+    // Verify the pet belongs to this user
+    $pet = $wpdb->get_row($wpdb->prepare(
+        "SELECT * FROM $pets_table WHERE hmo_id = %s AND guardian_email = %s",
+        $hmo_id,
+        $current_user->user_email
+    ));
+
+    if (!$pet) {
+        wp_send_json_error('Pet not found or access denied');
+        return;
+    }
+
+    // Store in session
+    session_start();
+    $_SESSION['skeepy_current_pet_hmo'] = $hmo_id;
+
+    wp_send_json_success('Pet switched successfully');
+}
+
+// Update guardian info handler
+function skeepy_update_guardian_info_handler() {
+    // More flexible authentication check - prioritize user login over nonce
+    if (!is_user_logged_in()) {
+        wp_send_json_error('User not logged in');
+        return;
+    }
+
+    // Check nonce only if present - allows fresh login sessions to work
+    if (isset($_POST['security']) && !wp_verify_nonce($_POST['security'], 'skeepy_update_guardian')) {
+        wp_send_json_error('Security check failed');
+        return;
+    }
+
+    $current_user = wp_get_current_user();
+    global $wpdb;
+    $pets_table = $wpdb->prefix . 'skeepy_pets';
+
+    // Get current pet
+    session_start();
+    $current_hmo = $_SESSION['skeepy_current_pet_hmo'] ?? '';
+    
+    if (empty($current_hmo)) {
+        // Get first pet for this user
+        $pet = $wpdb->get_row($wpdb->prepare(
+            "SELECT * FROM $pets_table WHERE guardian_email = %s ORDER BY registration_date DESC LIMIT 1",
+            $current_user->user_email
+        ));
+        $current_hmo = $pet->hmo_id ?? '';
+    }
+
+    if (empty($current_hmo)) {
+        wp_send_json_error('No pet found');
+        return;
+    }
+
+    // Update guardian information
+    $update_data = [
+        'guardian_first_name' => sanitize_text_field($_POST['first_name']),
+        'guardian_surname' => sanitize_text_field($_POST['surname']),
+        'guardian_phone' => sanitize_text_field($_POST['phone']),
+        'guardian_address' => sanitize_textarea_field($_POST['address']),
+        'guardian_state' => sanitize_text_field($_POST['state'])
+    ];
+
+    $updated = $wpdb->update(
+        $pets_table,
+        $update_data,
+        ['hmo_id' => $current_hmo],
+        ['%s', '%s', '%s', '%s', '%s'],
+        ['%s']
+    );
+
+    if ($updated === false) {
+        wp_send_json_error('Failed to update guardian information');
+        return;
+    }
+
+    wp_send_json_success('Guardian information updated successfully');
+}
+
+// Get vet visits handler
+function skeepy_get_vet_visits_handler() {
+    // More flexible authentication check - prioritize user login over nonce
+    if (!is_user_logged_in()) {
+        wp_send_json_error('User not logged in');
+        return;
+    }
+
+    // Check nonce only if present - allows fresh login sessions to work
+    if (isset($_POST['security']) && !wp_verify_nonce($_POST['security'], 'skeepy_vet_visits')) {
+        wp_send_json_error('Security check failed');
+        return;
+    }
+
+    $current_user = wp_get_current_user();
+    global $wpdb;
+    $pets_table = $wpdb->prefix . 'skeepy_pets';
+    $claims_table = $wpdb->prefix . 'skeepy_claims';
+
+    // Get current pet
+    session_start();
+    $current_hmo = $_SESSION['skeepy_current_pet_hmo'] ?? '';
+    
+    if (empty($current_hmo)) {
+        // Get first pet for this user
+        $pet = $wpdb->get_row($wpdb->prepare(
+            "SELECT * FROM $pets_table WHERE guardian_email = %s ORDER BY registration_date DESC LIMIT 1",
+            $current_user->user_email
+        ));
+        $current_hmo = $pet->hmo_id ?? '';
+    }
+
+    if (empty($current_hmo)) {
+        wp_send_json_error('No pet found');
+        return;
+    }
+
+    // Build date filter
+    $date_filter = sanitize_text_field($_POST['date_filter']);
+    $date_condition = '';
+    
+    switch ($date_filter) {
+        case 'this_week':
+            $date_condition = "AND treatment_date >= DATE_SUB(NOW(), INTERVAL 1 WEEK)";
+            break;
+        case 'this_month':
+            $date_condition = "AND treatment_date >= DATE_SUB(NOW(), INTERVAL 1 MONTH)";
+            break;
+        case 'this_year':
+            $date_condition = "AND YEAR(treatment_date) = YEAR(NOW())";
+            break;
+        case 'custom':
+            $start_date = sanitize_text_field($_POST['start_date']);
+            $end_date = sanitize_text_field($_POST['end_date']);
+            if (!empty($start_date) && !empty($end_date)) {
+                $date_condition = $wpdb->prepare(
+                    "AND treatment_date BETWEEN %s AND %s",
+                    $start_date,
+                    $end_date
+                );
+            }
+            break;
+    }
+
+    // Get vet visits
+    $visits = $wpdb->get_results($wpdb->prepare(
+        "SELECT claim_id, treatment_date, clinic_name, status, total_amount 
+         FROM $claims_table 
+         WHERE patient_hmo_id = %s 
+         $date_condition 
+         ORDER BY treatment_date DESC",
+        $current_hmo
+    ));
+
+    wp_send_json_success($visits);
+}
+
+// Get claim details handler
+function skeepy_get_claim_details_handler() {
+    // More flexible authentication check - prioritize user login over nonce
+    if (!is_user_logged_in()) {
+        wp_send_json_error('User not logged in');
+        return;
+    }
+
+    // Check nonce only if present - allows fresh login sessions to work
+    if (isset($_POST['security']) && !wp_verify_nonce($_POST['security'], 'skeepy_claim_details')) {
+        wp_send_json_error('Security check failed');
+        return;
+    }
+
+    $claim_id = sanitize_text_field($_POST['claim_id']);
+    $current_user = wp_get_current_user();
+
+    global $wpdb;
+    $claims_table = $wpdb->prefix . 'skeepy_claims';
+    $pets_table = $wpdb->prefix . 'skeepy_pets';
+
+    // Get claim details - verify it belongs to user's pet
+    $claim = $wpdb->get_row($wpdb->prepare(
+        "SELECT c.* FROM $claims_table c 
+         JOIN $pets_table p ON c.patient_hmo_id = p.hmo_id 
+         WHERE c.claim_id = %s AND p.guardian_email = %s",
+        $claim_id,
+        $current_user->user_email
+    ));
+
+    if (!$claim) {
+        wp_send_json_error('Claim not found or access denied');
+        return;
+    }
+
+    // Clean up total_amount
+    $claim->total_amount = floatval(str_replace(['₦', ','], '', $claim->total_amount));
+
+    wp_send_json_success($claim);
+}
+
+// Pet logout handler
+function skeepy_pet_logout_handler() {
+    // Check for nonce in both possible parameter names
+    $nonce = $_POST['nonce'] ?? $_POST['security'] ?? '';
+    
+    if (empty($nonce) || !wp_verify_nonce($nonce, 'skeepy_pet_logout_nonce')) {
+        wp_send_json_error('Security check failed');
+        return;
+    }
+
+    // Clear session
+    if (session_status() === PHP_SESSION_NONE) {
+        session_start();
+    }
+    session_destroy();
+
+    // WordPress logout
+    wp_logout();
+
+    wp_send_json_success('Logged out successfully');
+}
+
+// Get amount paid out handler
+function skeepy_get_amount_paid_out_handler() {
+    // More flexible authentication check - prioritize user login over nonce
+    if (!is_user_logged_in()) {
+        wp_send_json_error('User not logged in');
+        return;
+    }
+
+    // Check nonce only if present - allows fresh login sessions to work
+    if (isset($_POST['security']) && !wp_verify_nonce($_POST['security'], 'skeepy_amount_paid_out')) {
+        wp_send_json_error('Security check failed');
+        return;
+    }
+
+    $current_user = wp_get_current_user();
+    if (!in_array('skeepy_pet_parent', $current_user->roles)) {
+        wp_send_json_error('Access denied');
+        return;
+    }
+
+    global $wpdb;
+    $pets_table = $wpdb->prefix . 'skeepy_pets';
+    $claims_table = $wpdb->prefix . 'skeepy_claims';
+
+    // Get current pet
+    session_start();
+    $current_hmo = $_SESSION['skeepy_current_pet_hmo'] ?? '';
+    
+    if (empty($current_hmo)) {
+        // Get first pet for this user
+        $pet = $wpdb->get_row($wpdb->prepare(
+            "SELECT * FROM $pets_table WHERE guardian_email = %s ORDER BY registration_date DESC LIMIT 1",
+            $current_user->user_email
+        ));
+        $current_hmo = $pet->hmo_id ?? '';
+    }
+
+    if (empty($current_hmo)) {
+        wp_send_json_error('No pet found');
+        return;
+    }
+
+    // Calculate amount paid out (undiscounted amount from approved claims)
+    $amount_paid_out = $wpdb->get_var($wpdb->prepare(
+        "SELECT SUM(
+            CAST(REPLACE(REPLACE(REPLACE(total_amount, '₦', ''), ',', ''), ' ', '') AS DECIMAL(10,2)) / 
+            (1 - (
+                CASE 
+                    WHEN services LIKE '%General Consultation%' OR services LIKE '%Premium Grooming%' OR services LIKE '%Basic Grooming%' OR services LIKE '%Dental Cleaning%' OR services LIKE '%Comprehensive Physical Exam%' OR services LIKE '%Basic Blood Work%' OR services LIKE '%Wound Repair%' OR services LIKE '%Tail Removal%' OR services LIKE '%Other Surgeries%' OR services LIKE '%Pet Boarding%' OR services LIKE '%Emergency Boarding Support%' OR services LIKE '%Pet Sitting%' THEN 0.15
+                    WHEN services LIKE '%Routine Medication%' OR services LIKE '%Chronic Disease Medication%' OR services LIKE '%Supplements Prescribed%' THEN 0.00
+                    ELSE 0.10
+                END
+            ))
+        ) 
+        FROM $claims_table 
+        WHERE patient_hmo_id = %s 
+        AND status IN ('approved', 'paid')",
+        $current_hmo
+    )) ?: 0;
+
+    wp_send_json_success([
+        'amount_paid_out' => $amount_paid_out
+    ]);
+}
+
+// Register AJAX handlers
+add_action('wp_ajax_skeepy_pet_dashboard_data', 'skeepy_pet_dashboard_data_handler');
+add_action('wp_ajax_skeepy_switch_pet', 'skeepy_switch_pet_handler');
+add_action('wp_ajax_skeepy_update_guardian_info', 'skeepy_update_guardian_info_handler');
+add_action('wp_ajax_skeepy_get_vet_visits', 'skeepy_get_vet_visits_handler');
+add_action('wp_ajax_skeepy_get_claim_details', 'skeepy_get_claim_details_handler');
+add_action('wp_ajax_skeepy_pet_logout', 'skeepy_pet_logout_handler');
+add_action('wp_ajax_skeepy_get_amount_paid_out', 'skeepy_get_amount_paid_out_handler');
+
+// Add CSS override to make icons appear at top
+add_action('wp_head', function() {
+    echo '<style>
+        .skeepy-stat-content {
+            display: flex !important;
+            flex-direction: column !important;
+            align-items: center !important;
+            text-align: center !important;
+            gap: 16px !important;
+        }
+        .skeepy-stat-icon {
+            margin: 0 auto !important;
+        }
+        
+        .skeepy-stat-card {
+            position: relative !important;
+        }
+        
+        .skeepy-info-icon {
+            position: absolute;
+            top: 12px;
+            right: 12px;
+            width: 24px;
+            height: 24px;
+            border: 2px solid #059669;
+            border-radius: 50%;
+            background: none;
+            color: #059669;
+            cursor: pointer;
+            font-size: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-style: italic;
+            z-index: 10;
+        }
+        
+        .skeepy-info-icon:hover {
+            background: #059669;
+            color: white;
+        }
+        
+        .skeepy-stat-card:nth-child(3) .skeepy-stat-icon i {
+            font-family: "Font Awesome 5 Free" !important;
+        }
+        
+        .skeepy-stat-card:nth-child(3) .skeepy-stat-icon i.fa-paw::before {
+            content: "\\f0c0" !important;
+        }
+        
+        .skeepy-info-popup {
+            position: fixed;
+            top: 80px;
+            right: 20px;
+            background: #ffffff;
+            border: 2px solid #145362;
+            border-radius: 8px;
+            padding: 15px 35px 15px 20px;
+            width: 350px;
+            max-width: 90vw;
+            min-height: 120px;
+            font-size: 14px;
+            color: #374151;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            z-index: 1000;
+            display: none;
+            line-height: 1.4;
+            text-align: left;
+        }
+        
+        .skeepy-info-popup-title {
+            font-weight: bold;
+            font-size: 16px;
+            color: #145362;
+            margin-bottom: 8px;
+        }
+        
+        .skeepy-info-popup::after {
+            content: "×";
+            position: absolute;
+            top: 8px;
+            right: 12px;
+            font-size: 20px;
+            color: #dc2626;
+            cursor: pointer;
+            font-weight: bold;
+            line-height: 1;
+            width: 20px;
+            height: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 50%;
+            transition: background-color 0.2s;
+        }
+        
+        .skeepy-info-popup::after:hover {
+            background-color: #fee2e2;
+        }
+    </style>';
+});
+
+// Add JavaScript for info popup
+add_action('wp_footer', function() {
+    echo '<script>
+        function showInfoPopup(event, infoId) {
+            // Hide all popups first
+            const allPopups = document.querySelectorAll(".skeepy-info-popup");
+            allPopups.forEach(popup => popup.style.display = "none");
+            
+            const popup = document.getElementById(infoId);
+            if (popup) {
+                popup.style.display = "block";
+                
+                // Position popup at click location
+                const popupWidth = 350;
+                const popupHeight = 120;
+                const margin = 20;
+                
+                let left = event.clientX - (popupWidth / 2);
+                let top = event.clientY - 60;
+                
+                // Keep popup within viewport bounds
+                if (left < margin) left = margin;
+                if (left + popupWidth > window.innerWidth - margin) left = window.innerWidth - popupWidth - margin;
+                if (top < margin) top = event.clientY + 20;
+                if (top + popupHeight > window.innerHeight - margin) top = window.innerHeight - popupHeight - margin;
+                
+                popup.style.position = "fixed";
+                popup.style.left = left + "px";
+                popup.style.top = top + "px";
+                popup.style.right = "auto";
+            }
+        }
+        
+        function hideAllPopups() {
+            const allPopups = document.querySelectorAll(".skeepy-info-popup");
+            allPopups.forEach(popup => popup.style.display = "none");
+        }
+        
+        // Handle clicks
+        document.addEventListener("click", function(e) {
+            // Check if click is on close icon (top right area of popup)
+            const clickedPopup = e.target.closest(".skeepy-info-popup");
+            if (clickedPopup) {
+                const rect = clickedPopup.getBoundingClientRect();
+                const closeArea = {
+                    left: rect.right - 32,
+                    right: rect.right - 2,
+                    top: rect.top + 2,
+                    bottom: rect.top + 28
+                };
+                
+                if (e.clientX >= closeArea.left && e.clientX <= closeArea.right && 
+                    e.clientY >= closeArea.top && e.clientY <= closeArea.bottom) {
+                    hideAllPopups();
+                    return;
+                }
+            } else {
+                // Click is outside any popup, hide all
+                hideAllPopups();
+            }
+        });
+    </script>';
+});
+
+// Add info popups HTML
+add_action('wp_footer', function() {
+    echo '
+    <div id="plan-streak-info" class="skeepy-info-popup">
+        <div class="skeepy-info-popup-title">Plan Streak</div>
+        This is the total number of months or years you went without defaulting on your plan renewal.
+    </div>
+    
+    <div id="skeepers-info" class="skeepy-info-popup">
+        <div class="skeepy-info-popup-title">Skeepers From Me</div>
+        This is the total number of paying Skeepy subscribers that signed up using your referral code or referral link. It also counts the number of referrals that signed up through those who signed up using your referral code or referral link.
+    </div>
+    
+    <!-- Support Modal -->
+    <div class="support-modal" id="support-modal">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3 class="modal-title" style="color: #145362;">Contact Support</h3>
+                <button class="modal-close" onclick="closeSupportModal()" style="color: red;">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            
+            <div class="modal-body">
+                <a href="javascript:void(0)" onclick="window.open(\'tel:02013306472\', \'_self\')" class="support-item">
+                    <i class="fas fa-phone"></i>
+                    <div class="support-text">
+                        <div class="support-label">Call</div>
+                        <div class="support-value">02013306472</div>
+                    </div>
+                </a>
+                
+                <a href="javascript:void(0)" onclick="window.open(\'mailto:help@skeepy.co\', \'_self\')" class="support-item">
+                    <i class="fas fa-envelope"></i>
+                    <div class="support-text">
+                        <div class="support-label">Email</div>
+                        <div class="support-value">help@skeepy.co</div>
+                    </div>
+                </a>
+                
+                <a href="javascript:void(0)" onclick="window.open(\'https://wa.me/2349032810410\', \'_blank\')" class="support-item">
+                    <i class="fab fa-whatsapp"></i>
+                    <div class="support-text">
+                        <div class="support-label">WhatsApp</div>
+                        <div class="support-value">09032810410</div>
+                    </div>
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Sign Out Modal -->
+    <div class="support-modal" id="skeepy-signout-modal">
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <h3 class="modal-title">Want to sign out?</h3>
+                <button class="modal-close" onclick="closeSignOutModal()">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            
+            <div class="modal-body">
+                <div style="display: flex; gap: 12px; justify-content: center; margin-top: 20px;">
+                    <button onclick="closeSignOutModal()" style="padding: 12px 24px; background: #F3F4F6; color: #374151; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: all 0.2s ease; min-width: 80px;">
+                        No
+                    </button>
+                    <button onclick="confirmPetSignOut()" style="padding: 12px 24px; background: #DC2626; color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: all 0.2s ease; min-width: 80px;">
+                        Yes
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>';
+});
+
+
+// Get coverage data handler
+function skeepy_get_coverage_data_handler() {
+    if (!wp_verify_nonce($_POST["security"], "skeepy_pet_nonce")) {
+        wp_send_json_error("Security check failed");
+        return;
+    }
+
+    if (!is_user_logged_in()) {
+        wp_send_json_error("User not logged in");
+        return;
+    }
+
+    $current_user = wp_get_current_user();
+    global $wpdb;
+    $pets_table = $wpdb->prefix . "skeepy_pets";
+    $claims_table = $wpdb->prefix . "skeepy_claims";
+    $clinics_table = $wpdb->prefix . "skeepy_clinics";
+
+    // Get current pet
+    session_start();
+    $current_hmo = $_SESSION["skeepy_current_pet_hmo"] ?? "";
+    
+    if (empty($current_hmo)) {
+        // Get first pet for this user
+        $pet = $wpdb->get_row($wpdb->prepare(
+            "SELECT * FROM $pets_table WHERE guardian_email = %s ORDER BY registration_date DESC LIMIT 1",
+            $current_user->user_email
+        ));
+        $current_hmo = $pet->hmo_id ?? "";
+    }
+
+    if (empty($current_hmo)) {
+        wp_send_json_error("No pet found");
+        return;
+    }
+
+    // Get pet data
+    $pet = $wpdb->get_row($wpdb->prepare(
+        "SELECT * FROM $pets_table WHERE hmo_id = %s",
+        $current_hmo
+    ));
+
+    if (!$pet) {
+        wp_send_json_error("Pet not found");
+        return;
+    }
+
+    // Get hospital information from the latest claim
+    $latest_claim = $wpdb->get_row($wpdb->prepare(
+        "SELECT * FROM $claims_table WHERE patient_hmo_id = %s ORDER BY treatment_date DESC LIMIT 1",
+        $current_hmo
+    ));
+
+    $hospital_info = [
+        "clinic_name" => "N/A",
+        "provider_id" => "N/A",
+        "address" => "N/A",
+        "representative" => "N/A",
+        "phone" => "N/A",
+        "email" => "N/A"
+    ];
+
+    if ($latest_claim) {
+        // Get clinic information
+        $clinic = $wpdb->get_row($wpdb->prepare(
+            "SELECT * FROM $clinics_table WHERE clinic_name = %s",
+            $latest_claim->clinic_name
+        ));
+
+        if ($clinic) {
+            $hospital_info = [
+                "clinic_name" => $clinic->clinic_name,
+                "provider_id" => $clinic->provider_id,
+                "address" => $clinic->clinic_address,
+                "representative" => $clinic->rep_first_name . " " . $clinic->rep_last_name,
+                "phone" => $clinic->clinic_phone,
+                "email" => $clinic->clinic_email
+            ];
+        }
+    }
+
+    // Get benefits based on plan type
+    $benefits = [];
+    $plan_type = $pet->plan_type;
+    
+    // Calculate waiting periods (using plan start date)
+    $plan_start_date = new DateTime($pet->registration_date);
+    $current_date = new DateTime();
+    $days_since_start = $current_date->diff($plan_start_date)->days;
+    
+    if ($plan_type === "Pawtastic") {
+        $benefits = [
+            ["name" => "General Consultation", "usage" => 0, "limit" => "unlimited", "available" => true, "type" => "unlimited"],
+            ["name" => "Deworming", "usage" => 0, "limit" => 4, "available" => $days_since_start >= 30, "waiting_date" => $plan_start_date->modify('+30 days')->format('M j, Y'), "type" => "count"],
+            ["name" => "Rabies Vaccine", "usage" => 0, "limit" => 4, "available" => $days_since_start >= 60, "waiting_date" => $plan_start_date->modify('+60 days')->format('M j, Y'), "type" => "count"],
+            ["name" => "Basic Grooming", "usage" => 0, "limit" => 2, "available" => $days_since_start >= 60, "waiting_date" => $plan_start_date->modify('+60 days')->format('M j, Y'), "type" => "count"],
+            ["name" => "Surgery", "usage" => 0, "limit" => "₦150,000", "available" => true, "type" => "amount"],
+            ["name" => "Spaying", "usage" => 0, "limit" => "Part of Surgery Limit", "available" => $days_since_start >= 180, "waiting_date" => $plan_start_date->modify('+180 days')->format('M j, Y'), "type" => "special"],
+            ["name" => "Neutering", "usage" => 0, "limit" => "Part of Surgery Limit", "available" => $days_since_start >= 180, "waiting_date" => $plan_start_date->modify('+180 days')->format('M j, Y'), "type" => "special"]
+        ];
+    } elseif ($plan_type === "Furrtastic") {
+        $benefits = [
+            ["name" => "General Consultation", "usage" => 0, "limit" => "unlimited", "available" => true, "type" => "unlimited"],
+            ["name" => "Deworming", "usage" => 0, "limit" => 6, "available" => $days_since_start >= 30, "waiting_date" => $plan_start_date->modify('+30 days')->format('M j, Y'), "type" => "count"],
+            ["name" => "Rabies Vaccine", "usage" => 0, "limit" => 6, "available" => $days_since_start >= 60, "waiting_date" => $plan_start_date->modify('+60 days')->format('M j, Y'), "type" => "count"],
+            ["name" => "Basic Grooming", "usage" => 0, "limit" => 4, "available" => $days_since_start >= 60, "waiting_date" => $plan_start_date->modify('+60 days')->format('M j, Y'), "type" => "count"],
+            ["name" => "Premium Grooming", "usage" => 0, "limit" => 2, "available" => $days_since_start >= 60, "waiting_date" => $plan_start_date->modify('+60 days')->format('M j, Y'), "type" => "count"],
+            ["name" => "Surgery", "usage" => 0, "limit" => "₦300,000", "available" => true, "type" => "amount"],
+            ["name" => "Spaying", "usage" => 0, "limit" => "Part of Surgery Limit", "available" => $days_since_start >= 180, "waiting_date" => $plan_start_date->modify('+180 days')->format('M j, Y'), "type" => "special"],
+            ["name" => "Neutering", "usage" => 0, "limit" => "Part of Surgery Limit", "available" => $days_since_start >= 180, "waiting_date" => $plan_start_date->modify('+180 days')->format('M j, Y'), "type" => "special"]
+        ];
+    } elseif ($plan_type === "Purrfect") {
+        $benefits = [
+            ["name" => "General Consultation", "usage" => 0, "limit" => "unlimited", "available" => true, "type" => "unlimited"],
+            ["name" => "Deworming", "usage" => 0, "limit" => 12, "available" => $days_since_start >= 30, "waiting_date" => $plan_start_date->modify('+30 days')->format('M j, Y'), "type" => "count"],
+            ["name" => "Rabies Vaccine", "usage" => 0, "limit" => 12, "available" => $days_since_start >= 60, "waiting_date" => $plan_start_date->modify('+60 days')->format('M j, Y'), "type" => "count"],
+            ["name" => "Basic Grooming", "usage" => 0, "limit" => 6, "available" => $days_since_start >= 60, "waiting_date" => $plan_start_date->modify('+60 days')->format('M j, Y'), "type" => "count"],
+            ["name" => "Premium Grooming", "usage" => 0, "limit" => 4, "available" => $days_since_start >= 60, "waiting_date" => $plan_start_date->modify('+60 days')->format('M j, Y'), "type" => "count"],
+            ["name" => "Surgery", "usage" => 0, "limit" => "₦500,000", "available" => true, "type" => "amount"],
+            ["name" => "Spaying", "usage" => 0, "limit" => "Part of Surgery Limit", "available" => $days_since_start >= 180, "waiting_date" => $plan_start_date->modify('+180 days')->format('M j, Y'), "type" => "special"],
+            ["name" => "Neutering", "usage" => 0, "limit" => "Part of Surgery Limit", "available" => $days_since_start >= 180, "waiting_date" => $plan_start_date->modify('+180 days')->format('M j, Y'), "type" => "special"]
+        ];
+    }
+
+    // Get usage data from claims
+    $claims = $wpdb->get_results($wpdb->prepare(
+        "SELECT * FROM $claims_table WHERE patient_hmo_id = %s AND status IN (\"approved\", \"paid\")",
+        $current_hmo
+    ));
+
+    $usage_count = [];
+    foreach ($claims as $claim) {
+        $services = json_decode($claim->services, true);
+        if (is_array($services)) {
+            foreach ($services as $service) {
+                $service_name = $service["name"];
+                $usage_count[$service_name] = ($usage_count[$service_name] ?? 0) + 1;
+            }
+        }
+    }
+
+    // Update benefits with usage data
+    foreach ($benefits as &$benefit) {
+        $benefit["usage"] = $usage_count[$benefit["name"]] ?? 0;
+    }
+
+    wp_send_json_success([
+        "hospital" => $hospital_info,
+        "benefits" => $benefits
+    ]);
+}
+
+add_action("wp_ajax_skeepy_get_coverage_data", "skeepy_get_coverage_data_handler");
+add_action("wp_ajax_nopriv_skeepy_get_coverage_data", "skeepy_get_coverage_data_handler");
+
+// Add JavaScript functions for modal functionality
+add_action('wp_footer', function() {
+    ?>
+    <script>
+        // Support Modal Functions
+        function showSupportModal() {
+            document.getElementById('support-modal').classList.add('active');
+        }
+        
+        function closeSupportModal() {
+            document.getElementById('support-modal').classList.remove('active');
+        }
+        
+        // Sign Out Modal Functions
+        function showSignOutModal() {
+            document.getElementById('signout-modal').classList.add('active');
+        }
+        
+        function closeSignOutModal() {
+            document.getElementById('signout-modal').classList.remove('active');
+        }
+        
+
+        
+        // Close modals when clicking outside
+        document.addEventListener('click', function(e) {
+            if (e.target.classList.contains('support-modal')) {
+                e.target.classList.remove('active');
+            }
+        });
+        
+        // Close modals with Escape key
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                closeSupportModal();
+                closeSignOutModal();
+            }
+        });
+    </script>
+    <?php
+});
+
